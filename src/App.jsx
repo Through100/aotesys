@@ -167,6 +167,24 @@ function getPendingKnowledgeConversations(channel) {
   return (channel?.conversations || []).filter(isConversationPendingKnowledge);
 }
 
+function getKnowledgeAuditStats(channel) {
+  const conversations = (channel?.conversations || []).filter(
+    hasKnowledgeAuditContent
+  );
+  const pendingConversations = conversations.filter(
+    isConversationPendingKnowledge
+  );
+  const auditedCount = conversations.filter(
+    (conversation) => conversation.autoKnowledgeAuditedAt
+  ).length;
+
+  return {
+    auditedCount,
+    pendingConversations,
+    totalCount: conversations.length
+  };
+}
+
 function isConversationPendingKnowledge(conversation) {
   if (!hasKnowledgeAuditContent(conversation)) {
     return false;
@@ -589,7 +607,8 @@ export default function App() {
         })
       );
       setKnowledgeAuditStatus(
-        `Updated ${getPluralLabel(auditedIds.size, "conversation")}.`
+        result.summary ||
+          `Updated ${getPluralLabel(auditedIds.size, "conversation")}.`
       );
     } catch {
       setKnowledgeAuditStatus(
@@ -1245,6 +1264,10 @@ function ConversationPanel({
 }) {
   const [conversationMode, setConversationMode] = useState("chats");
   const isSettingsMode = conversationMode === "settings";
+  const knowledgeAuditStats = useMemo(
+    () => getKnowledgeAuditStats(selectedChannel),
+    [selectedChannel]
+  );
 
   return (
     <section className="conversation-layout">
@@ -1345,6 +1368,22 @@ function ConversationPanel({
                     onAutoKnowledgePromptChange(event.target.value)
                   }
                 />
+                <div className="audit-trace" aria-label="Knowledge audit trace">
+                  <div>
+                    <strong>
+                      {knowledgeAuditStats.pendingConversations.length}
+                    </strong>
+                    <span>Pending</span>
+                  </div>
+                  <div>
+                    <strong>{knowledgeAuditStats.auditedCount}</strong>
+                    <span>Audited</span>
+                  </div>
+                  <div>
+                    <strong>{knowledgeAuditStats.totalCount}</strong>
+                    <span>Sources</span>
+                  </div>
+                </div>
                 <div className="knowledge-actions">
                   <span className="audit-status">
                     {pendingKnowledgeCount} pending · Last run{" "}
@@ -1361,6 +1400,17 @@ function ConversationPanel({
                 </div>
                 {knowledgeAuditStatus && (
                   <p className="knowledge-status">{knowledgeAuditStatus}</p>
+                )}
+                {knowledgeAuditStats.pendingConversations.length > 0 && (
+                  <div className="pending-source-list">
+                    {knowledgeAuditStats.pendingConversations.map(
+                      (conversation) => (
+                        <span key={conversation.id}>
+                          {conversation.visitorName || "Visitor"}
+                        </span>
+                      )
+                    )}
+                  </div>
                 )}
               </div>
             </div>

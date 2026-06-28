@@ -578,6 +578,52 @@ button {
   gap: 12px;
 }
 
+.audit-trace {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.audit-trace div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid #dbe6e0;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f7faf7;
+}
+
+.audit-trace strong {
+  color: #173b3f;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.audit-trace span,
+.pending-source-list span {
+  overflow: hidden;
+  color: #657278;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pending-source-list span {
+  max-width: 180px;
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #31534e;
+  background: #eaf5f0;
+}
+
 .checkbox-row {
   display: inline-flex;
   align-items: center;

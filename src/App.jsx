@@ -116,6 +116,12 @@ function getVisitorSessionId(channelId) {
 
 function detectVisitorName(text) {
   const trimmedText = text.trim();
+  const lowerText = trimmedText.toLowerCase();
+
+  if (["hi", "hello", "hey", "kia ora"].includes(lowerText)) {
+    return "";
+  }
+
   const namedMatch = trimmedText.match(
     /(?:my name is|i am|i'm|im|call me)\s+([a-z][a-z\s'-]{1,40})/i
   );
@@ -141,7 +147,29 @@ function cleanVisitorName(value) {
     .join(" ");
 }
 
-function buildBotReply(text, visitorName, detectedName) {
+async function requestBotReply(channel, conversation, text) {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message: text,
+      prompt: channel.prompt,
+      visitorName: conversation.visitorName,
+      history: conversation.messages
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error("Ollama request failed.");
+  }
+
+  const data = await response.json();
+  return data.reply;
+}
+
+function buildFallbackBotReply(text, visitorName, detectedName) {
   const lowerText = text.toLowerCase();
   const name = detectedName || visitorName;
 
@@ -352,12 +380,47 @@ export default function App() {
     );
   };
 
-  const sendVisitorMessage = (channelId, conversationId, text) => {
+  const appendBotMessage = (channelId, conversationId, text, status) => {
+    setChannels((current) =>
+      current.map((channel) => {
+        if (channel.id !== channelId) {
+          return channel;
+        }
+
+        return {
+          ...channel,
+          conversations: channel.conversations.map((conversation) => {
+            if (conversation.id !== conversationId) {
+              return conversation;
+            }
+
+            return {
+              ...conversation,
+              status,
+              lastSeen: "Just now",
+              messages: [
+                ...conversation.messages,
+                {
+                  id: conversation.messages.length + 1,
+                  role: "bot",
+                  text
+                }
+              ]
+            };
+          })
+        };
+      })
+    );
+  };
+
+  const sendVisitorMessage = async (channelId, conversationId, text) => {
     const messageText = text.trim();
 
     if (!messageText) {
       return;
     }
+
+    let botContext;
 
     setChannels((current) =>
       current.map((channel) => {
@@ -377,16 +440,10 @@ export default function App() {
               conversation.visitorName === "Visitor" && detectedName
                 ? detectedName
                 : conversation.visitorName;
-            const botReply = buildBotReply(
-              messageText,
-              conversation.visitorName,
-              detectedName
-            );
-
-            return {
+            const nextConversation = {
               ...conversation,
               visitorName,
-              status: "Bot active",
+              status: "Bot typing",
               lastSeen: "Just now",
               messages: [
                 ...conversation.messages,
@@ -394,18 +451,45 @@ export default function App() {
                   id: conversation.messages.length + 1,
                   role: "visitor",
                   text: messageText
-                },
-                {
-                  id: conversation.messages.length + 2,
-                  role: "bot",
-                  text: botReply
                 }
               ]
             };
+
+            botContext = {
+              channel,
+              conversation: nextConversation,
+              fallbackReply: buildFallbackBotReply(
+                messageText,
+                conversation.visitorName,
+                detectedName
+              )
+            };
+
+            return nextConversation;
           })
         };
       })
     );
+
+    if (!botContext) {
+      return;
+    }
+
+    try {
+      const botReply = await requestBotReply(
+        botContext.channel,
+        botContext.conversation,
+        messageText
+      );
+      appendBotMessage(channelId, conversationId, botReply, "Bot active");
+    } catch {
+      appendBotMessage(
+        channelId,
+        conversationId,
+        botContext.fallbackReply,
+        "Bot fallback"
+      );
+    }
   };
 
   if (route.name === "public-chat") {
@@ -620,6 +704,7 @@ function PublicChatPage({
 }) {
   const [visitorConversationId] = useState(() => getVisitorSessionId(channelId));
   const [draftMessage, setDraftMessage] = useState("");
+  const [isSending, setIsSending] = useState(false);
 
   useEffect(() => {
     if (channel) {
@@ -631,13 +716,20 @@ function PublicChatPage({
     (item) => item.id === visitorConversationId
   );
 
-  const sendMessage = () => {
-    if (!draftMessage.trim() || !conversation) {
+  const sendMessage = async () => {
+    if (!draftMessage.trim() || !conversation || isSending) {
       return;
     }
 
-    onSendVisitorMessage(channelId, visitorConversationId, draftMessage);
+    const message = draftMessage;
     setDraftMessage("");
+    setIsSending(true);
+
+    try {
+      await onSendVisitorMessage(channelId, visitorConversationId, message);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   if (!channel) {
@@ -707,7 +799,7 @@ function PublicChatPage({
               onClick={sendMessage}
               title="Send message"
               aria-label="Send message"
-              disabled={!conversation}
+              disabled={!conversation || isSending}
             >
               <Send size={19} />
             </button>

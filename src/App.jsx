@@ -1,5 +1,6 @@
 import {
   Archive,
+  BookOpen,
   Bot,
   Check,
   ChevronLeft,
@@ -11,6 +12,7 @@ import {
   MessageCircle,
   MessagesSquare,
   Plus,
+  RefreshCcw,
   Send,
   Settings,
   UserRound
@@ -31,6 +33,10 @@ const initialChannels = [
     promptUpdatedAt: getTodayDate(),
     prompt:
       "You are Sale Assist. Greet visitors warmly, ask for their name, answer product questions clearly, and hand over to the business owner when needed.",
+    autoKnowledgeEnabled: false,
+    autoKnowledgePrompt: "",
+    autoKnowledgeUpdatedAt: "",
+    autoKnowledgeLastRunAt: "",
     conversations: [
       {
         id: "maria-lee",
@@ -38,6 +44,7 @@ const initialChannels = [
         status: "Bot active",
         lastSeen: "2 min ago",
         lastActivityAt: new Date(Date.now() - 120_000).toISOString(),
+        autoKnowledgeAuditedAt: "",
         archived: false,
         messages: [
           {
@@ -65,6 +72,7 @@ const initialChannels = [
         status: "Waiting",
         lastSeen: "Just now",
         lastActivityAt: new Date().toISOString(),
+        autoKnowledgeAuditedAt: "",
         archived: false,
         messages: [
           {
@@ -115,9 +123,14 @@ function normalizeChannels(channels) {
   return channels.map((channel) => ({
     ...channel,
     promptUpdatedAt: channel.promptUpdatedAt || getTodayDate(),
+    autoKnowledgeEnabled: Boolean(channel.autoKnowledgeEnabled),
+    autoKnowledgePrompt: channel.autoKnowledgePrompt || "",
+    autoKnowledgeUpdatedAt: channel.autoKnowledgeUpdatedAt || "",
+    autoKnowledgeLastRunAt: channel.autoKnowledgeLastRunAt || "",
     conversations: (channel.conversations || []).map((conversation) => ({
       ...conversation,
       archived: Boolean(conversation.archived),
+      autoKnowledgeAuditedAt: conversation.autoKnowledgeAuditedAt || "",
       lastActivityAt:
         conversation.lastActivityAt ||
         deriveLastActivityAt(conversation.lastSeen)
@@ -150,8 +163,59 @@ function getSortedVisibleConversations(channel) {
     );
 }
 
+function getPendingKnowledgeConversations(channel) {
+  return (channel?.conversations || []).filter(isConversationPendingKnowledge);
+}
+
+function isConversationPendingKnowledge(conversation) {
+  if (!hasKnowledgeAuditContent(conversation)) {
+    return false;
+  }
+
+  const auditedTime = Date.parse(conversation.autoKnowledgeAuditedAt || "");
+  const lastActivityTime = getConversationTime(conversation);
+
+  return !auditedTime || lastActivityTime > auditedTime;
+}
+
+function hasKnowledgeAuditContent(conversation) {
+  return (conversation?.messages || []).some((message) =>
+    ["visitor", "owner"].includes(message.role)
+  );
+}
+
+function toKnowledgeConversationPayload(conversation) {
+  return {
+    id: conversation.id,
+    visitorName: conversation.visitorName,
+    lastActivityAt: conversation.lastActivityAt,
+    messages: (conversation.messages || []).map((message) => ({
+      role: message.role,
+      text: message.text
+    }))
+  };
+}
+
 function getConversationTime(conversation) {
   return Date.parse(conversation.lastActivityAt || "") || 0;
+}
+
+function formatAuditDate(value) {
+  if (!value) {
+    return "Never";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Never";
+  }
+
+  return date.toLocaleString();
+}
+
+function getPluralLabel(count, label) {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
 function getVisitorSessionId(channelId) {
@@ -210,6 +274,9 @@ async function requestBotReply(channel, conversation, text) {
       message: text,
       prompt: channel.prompt,
       promptUpdatedAt: channel.promptUpdatedAt,
+      autoKnowledgeEnabled: channel.autoKnowledgeEnabled,
+      autoKnowledgePrompt: channel.autoKnowledgePrompt,
+      autoKnowledgeUpdatedAt: channel.autoKnowledgeUpdatedAt,
       visitorName: conversation.visitorName,
       history: conversation.messages
     })
@@ -248,6 +315,10 @@ function isLikelyBusinessRelated(lowerText) {
   return [
     "price",
     "cost",
+    "fee",
+    "charge",
+    "pricing",
+    "quote",
     "ship",
     "shipping",
     "deliver",
@@ -256,6 +327,12 @@ function isLikelyBusinessRelated(lowerText) {
     "availability",
     "feature",
     "package",
+    "plan",
+    "subscription",
+    "setup",
+    "support",
+    "install",
+    "installation",
     "service",
     "product",
     "policy",
@@ -297,6 +374,8 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [draftReply, setDraftReply] = useState("");
   const [copied, setCopied] = useState(false);
+  const [isKnowledgeUpdating, setIsKnowledgeUpdating] = useState(false);
+  const [knowledgeAuditStatus, setKnowledgeAuditStatus] = useState("");
 
   const selectedChannel = useMemo(
     () => channels.find((channel) => channel.id === selectedChannelId),
@@ -316,6 +395,11 @@ export default function App() {
     [selectedConversationId, visibleConversations]
   );
 
+  const pendingKnowledgeCount = useMemo(
+    () => getPendingKnowledgeConversations(selectedChannel).length,
+    [selectedChannel]
+  );
+
   const shareLink = `${window.location.origin}/chat/${selectedChannelId}`;
 
   useEffect(() => {
@@ -328,6 +412,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(CHANNELS_STORAGE_KEY, JSON.stringify(channels));
   }, [channels]);
+
+  useEffect(() => {
+    setKnowledgeAuditStatus("");
+  }, [selectedChannelId]);
 
   const navigate = (nextRoute) => {
     const path = nextRoute === "home" ? "/" : "/login";
@@ -356,6 +444,10 @@ export default function App() {
       promptUpdatedAt: getTodayDate(),
       prompt:
         "Introduce yourself, collect the visitor name, answer sales questions, and alert the owner if the visitor is ready to buy.",
+      autoKnowledgeEnabled: false,
+      autoKnowledgePrompt: "",
+      autoKnowledgeUpdatedAt: "",
+      autoKnowledgeLastRunAt: "",
       conversations: [
         {
           id: `${id}-visitor`,
@@ -363,6 +455,7 @@ export default function App() {
           status: "Bot active",
           lastSeen: "New",
           lastActivityAt: getNowIso(),
+          autoKnowledgeAuditedAt: "",
           archived: false,
           messages: [
             {
@@ -400,6 +493,113 @@ export default function App() {
     );
   };
 
+  const updateAutoKnowledgeEnabled = (autoKnowledgeEnabled) => {
+    setChannels((current) =>
+      current.map((channel) =>
+        channel.id === selectedChannelId
+          ? { ...channel, autoKnowledgeEnabled }
+          : channel
+      )
+    );
+  };
+
+  const updateAutoKnowledgePrompt = (autoKnowledgePrompt) => {
+    setChannels((current) =>
+      current.map((channel) =>
+        channel.id === selectedChannelId
+          ? { ...channel, autoKnowledgePrompt }
+          : channel
+      )
+    );
+  };
+
+  const auditAutoKnowledge = async () => {
+    if (!selectedChannel || isKnowledgeUpdating) {
+      return;
+    }
+
+    const pendingConversations =
+      getPendingKnowledgeConversations(selectedChannel);
+
+    if (pendingConversations.length === 0) {
+      setKnowledgeAuditStatus("No new conversations to audit.");
+      return;
+    }
+
+    setIsKnowledgeUpdating(true);
+    setKnowledgeAuditStatus(
+      `Auditing ${getPluralLabel(pendingConversations.length, "conversation")}...`
+    );
+
+    try {
+      const response = await fetch("/api/auto-knowledge", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          channelId: selectedChannel.id,
+          channelName: selectedChannel.name,
+          botPrompt: selectedChannel.prompt,
+          autoKnowledgePrompt: selectedChannel.autoKnowledgePrompt,
+          conversations: pendingConversations.map(toKnowledgeConversationPayload)
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("Auto knowledge update failed.");
+      }
+
+      const result = await response.json();
+      const now = getNowIso();
+      const fallbackAuditedIds = pendingConversations.map(
+        (conversation) => conversation.id
+      );
+      const auditedIds = new Set(
+        Array.isArray(result.auditedConversationIds) &&
+          result.auditedConversationIds.length > 0
+          ? result.auditedConversationIds
+          : fallbackAuditedIds
+      );
+      const nextKnowledgePrompt =
+        typeof result.autoKnowledgePrompt === "string"
+          ? result.autoKnowledgePrompt.trim()
+          : selectedChannel.autoKnowledgePrompt;
+
+      setChannels((current) =>
+        current.map((channel) => {
+          if (channel.id !== selectedChannel.id) {
+            return channel;
+          }
+
+          return {
+            ...channel,
+            autoKnowledgePrompt: nextKnowledgePrompt,
+            autoKnowledgeUpdatedAt: now,
+            autoKnowledgeLastRunAt: now,
+            conversations: channel.conversations.map((conversation) =>
+              auditedIds.has(conversation.id)
+                ? {
+                    ...conversation,
+                    autoKnowledgeAuditedAt: now
+                  }
+                : conversation
+            )
+          };
+        })
+      );
+      setKnowledgeAuditStatus(
+        `Updated ${getPluralLabel(auditedIds.size, "conversation")}.`
+      );
+    } catch {
+      setKnowledgeAuditStatus(
+        "Auto knowledge update failed. Check Ollama settings and try again."
+      );
+    } finally {
+      setIsKnowledgeUpdating(false);
+    }
+  };
+
   const sendOwnerReply = () => {
     if (!draftReply.trim() || !selectedConversation) {
       return;
@@ -423,6 +623,7 @@ export default function App() {
               status: "Owner joined",
               lastSeen: "Just now",
               lastActivityAt: getNowIso(),
+              autoKnowledgeAuditedAt: "",
               archived: false,
               messages: [
                 ...conversation.messages,
@@ -509,6 +710,7 @@ export default function App() {
               status: "Bot active",
               lastSeen: "Just now",
               lastActivityAt: getNowIso(),
+              autoKnowledgeAuditedAt: "",
               archived: false,
               messages: [
                 {
@@ -544,6 +746,7 @@ export default function App() {
               status,
               lastSeen: "Just now",
               lastActivityAt: getNowIso(),
+              autoKnowledgeAuditedAt: "",
               messages: [
                 ...conversation.messages,
                 {
@@ -592,6 +795,7 @@ export default function App() {
               status: "Bot typing",
               lastSeen: "Just now",
               lastActivityAt: getNowIso(),
+              autoKnowledgeAuditedAt: "",
               archived: false,
               messages: [
                 ...conversation.messages,
@@ -780,6 +984,9 @@ export default function App() {
             onCopyShareLink={copyShareLink}
             onPromptChange={updatePrompt}
             onPromptUpdatedAtChange={updatePromptUpdatedAt}
+            onAutoKnowledgeEnabledChange={updateAutoKnowledgeEnabled}
+            onAutoKnowledgePromptChange={updateAutoKnowledgePrompt}
+            onUpdateAutoKnowledge={auditAutoKnowledge}
             onDraftReplyChange={setDraftReply}
             onSendOwnerReply={sendOwnerReply}
             onArchiveConversation={() =>
@@ -787,6 +994,9 @@ export default function App() {
               selectedConversation &&
               archiveConversation(selectedChannel.id, selectedConversation.id)
             }
+            pendingKnowledgeCount={pendingKnowledgeCount}
+            isKnowledgeUpdating={isKnowledgeUpdating}
+            knowledgeAuditStatus={knowledgeAuditStatus}
           />
         )}
       </main>
@@ -1023,9 +1233,15 @@ function ConversationPanel({
   onCopyShareLink,
   onPromptChange,
   onPromptUpdatedAtChange,
+  onAutoKnowledgeEnabledChange,
+  onAutoKnowledgePromptChange,
+  onUpdateAutoKnowledge,
   onDraftReplyChange,
   onSendOwnerReply,
-  onArchiveConversation
+  onArchiveConversation,
+  pendingKnowledgeCount,
+  isKnowledgeUpdating,
+  knowledgeAuditStatus
 }) {
   const [conversationMode, setConversationMode] = useState("chats");
   const isSettingsMode = conversationMode === "settings";
@@ -1105,6 +1321,48 @@ function ConversationPanel({
                   onChange={(event) => onPromptChange(event.target.value)}
                 />
               </label>
+
+              <div className="knowledge-editor expanded">
+                <div className="knowledge-heading">
+                  <span>
+                    <BookOpen size={17} />
+                    Auto Knowledges Learning
+                  </span>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selectedChannel?.autoKnowledgeEnabled)}
+                      onChange={(event) =>
+                        onAutoKnowledgeEnabledChange(event.target.checked)
+                      }
+                    />
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <textarea
+                  value={selectedChannel?.autoKnowledgePrompt ?? ""}
+                  onChange={(event) =>
+                    onAutoKnowledgePromptChange(event.target.value)
+                  }
+                />
+                <div className="knowledge-actions">
+                  <span className="audit-status">
+                    {pendingKnowledgeCount} pending · Last run{" "}
+                    {formatAuditDate(selectedChannel?.autoKnowledgeLastRunAt)}
+                  </span>
+                  <button
+                    className="secondary-button"
+                    onClick={onUpdateAutoKnowledge}
+                    disabled={!selectedChannel || isKnowledgeUpdating}
+                  >
+                    <RefreshCcw size={18} />
+                    <span>{isKnowledgeUpdating ? "Updating" : "Update Now"}</span>
+                  </button>
+                </div>
+                {knowledgeAuditStatus && (
+                  <p className="knowledge-status">{knowledgeAuditStatus}</p>
+                )}
+              </div>
             </div>
           </section>
         </div>

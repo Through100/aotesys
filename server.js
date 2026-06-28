@@ -32,6 +32,18 @@ app.post("/api/chat", async (request, response) => {
   }
 });
 
+app.post("/api/auto-knowledge", async (request, response) => {
+  try {
+    const result = await createAutoKnowledgeUpdate(request.body);
+    response.json(result);
+  } catch (error) {
+    console.error("Auto knowledge update failed:", error.message);
+    response.status(502).json({
+      error: "The auto knowledge update could not reach the Ollama service."
+    });
+  }
+});
+
 if (isProduction) {
   const distPath = path.join(__dirname, "dist");
   app.use(express.static(distPath));
@@ -82,10 +94,9 @@ function loadEnvFile(envPath) {
 }
 
 async function createOllamaReply(payload) {
-  const baseUrl = process.env.OLLAMA_BASE_URL?.replace(/\/+$/, "");
   const model = process.env.OLLAMA_MODEL;
 
-  if (!baseUrl || !model) {
+  if (!model) {
     throw new Error("OLLAMA_BASE_URL and OLLAMA_MODEL must be set.");
   }
 
@@ -136,46 +147,21 @@ async function createOllamaReply(payload) {
 
   const prompt = String(payload?.prompt || "").trim();
   const promptUpdatedAt = String(payload?.promptUpdatedAt || "").trim();
+  const autoKnowledgePrompt = payload?.autoKnowledgeEnabled
+    ? String(payload?.autoKnowledgePrompt || "").trim()
+    : "";
+  const autoKnowledgeUpdatedAt = payload?.autoKnowledgeEnabled
+    ? String(payload?.autoKnowledgeUpdatedAt || "").trim()
+    : "";
   const promptAge = getPromptAge(promptUpdatedAt);
   const messages = buildMessages(payload, message, {
     prompt,
     promptAge,
-    promptUpdatedAt
+    promptUpdatedAt,
+    autoKnowledgePrompt,
+    autoKnowledgeUpdatedAt
   });
-  const isOpenAiCompatible = /\/v1(?:\/)?$/i.test(baseUrl);
-  const endpoint = isOpenAiCompatible
-    ? `${baseUrl}/chat/completions`
-    : `${baseUrl}/chat`;
-  const body = isOpenAiCompatible
-    ? { model, messages, stream: false }
-    : { model, messages, stream: false };
-
-  const headers = {
-    "Content-Type": "application/json"
-  };
-
-  if (process.env.OLLAMA_API_KEY) {
-    headers.Authorization = `Bearer ${process.env.OLLAMA_API_KEY}`;
-  }
-
-  const ollamaResponse = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  });
-
-  if (!ollamaResponse.ok) {
-    throw new Error(`Ollama returned HTTP ${ollamaResponse.status}.`);
-  }
-
-  const data = await ollamaResponse.json();
-  const reply = isOpenAiCompatible
-    ? data?.choices?.[0]?.message?.content
-    : data?.message?.content;
-
-  if (!reply) {
-    throw new Error("Ollama response did not include a reply.");
-  }
+  const reply = await sendOllamaMessages(messages, model);
 
   const decision = parseModelDecision(reply);
 
@@ -213,7 +199,84 @@ async function createOllamaReply(payload) {
   };
 }
 
-function buildMessages(payload, message, { prompt, promptAge, promptUpdatedAt }) {
+async function createAutoKnowledgeUpdate(payload) {
+  const model = process.env.AUTO_KNOWLEDGE_MODEL || process.env.OLLAMA_MODEL;
+
+  if (!model) {
+    throw new Error("OLLAMA_MODEL must be set.");
+  }
+
+  const conversations = Array.isArray(payload?.conversations)
+    ? payload.conversations
+    : [];
+  const existingKnowledge = String(payload?.autoKnowledgePrompt || "").trim();
+
+  if (conversations.length === 0) {
+    return {
+      autoKnowledgePrompt: existingKnowledge,
+      auditedConversationIds: [],
+      summary: "No conversations were provided."
+    };
+  }
+
+  const messages = buildAutoKnowledgeMessages(payload, conversations);
+  const reply = await sendOllamaMessages(messages, model);
+  const update = parseAutoKnowledgeUpdate(reply, existingKnowledge);
+
+  return {
+    ...update,
+    auditedConversationIds: conversations
+      .map((conversation) => String(conversation.id || "").trim())
+      .filter(Boolean)
+  };
+}
+
+async function sendOllamaMessages(messages, model) {
+  const baseUrl = process.env.OLLAMA_BASE_URL?.replace(/\/+$/, "");
+
+  if (!baseUrl || !model) {
+    throw new Error("OLLAMA_BASE_URL and OLLAMA_MODEL must be set.");
+  }
+
+  const isOpenAiCompatible = /\/v1(?:\/)?$/i.test(baseUrl);
+  const endpoint = isOpenAiCompatible
+    ? `${baseUrl}/chat/completions`
+    : `${baseUrl}/chat`;
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (process.env.OLLAMA_API_KEY) {
+    headers.Authorization = `Bearer ${process.env.OLLAMA_API_KEY}`;
+  }
+
+  const ollamaResponse = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model, messages, stream: false })
+  });
+
+  if (!ollamaResponse.ok) {
+    throw new Error(`Ollama returned HTTP ${ollamaResponse.status}.`);
+  }
+
+  const data = await ollamaResponse.json();
+  const reply = isOpenAiCompatible
+    ? data?.choices?.[0]?.message?.content
+    : data?.message?.content;
+
+  if (!reply) {
+    throw new Error("Ollama response did not include a reply.");
+  }
+
+  return reply;
+}
+
+function buildMessages(
+  payload,
+  message,
+  { prompt, promptAge, promptUpdatedAt, autoKnowledgePrompt, autoKnowledgeUpdatedAt }
+) {
   const visitorName = payload?.visitorName || "unknown";
   let history = Array.isArray(payload?.history) ? payload.history : [];
 
@@ -234,17 +297,23 @@ ${prompt || "(No approved facts have been provided yet.)"}
 
 Prompt last updated: ${promptUpdatedAt || "unknown"} (${promptAge.label}).
 
+Enabled Auto Knowledges Learning prompt:
+${autoKnowledgePrompt || "(Auto Knowledges Learning is disabled or empty.)"}
+
+Auto Knowledges Learning last updated: ${autoKnowledgeUpdatedAt || "unknown"}.
+
 Current visitor name: ${visitorName}.
 
 Accuracy rules:
-- Treat the approved channel prompt above as the only source of business truth.
+- Treat the approved channel prompt and enabled Auto Knowledges Learning prompt above as the only sources of business truth.
 - Do not invent prices, shipping details, availability, product/service features, policies, locations, timelines, guarantees, or contact details.
-- Answer a business question only when the answer is explicitly provided in the approved channel prompt or already stated by the visitor in this conversation.
+- Answer a business question only when the answer is explicitly provided in the approved channel prompt, enabled Auto Knowledges Learning prompt, or already stated by the visitor in this conversation.
 - If the answer is not explicitly provided, use this exact reply: "${MANAGER_HANDOFF_REPLY}"
 - If the visitor provides contact details, acknowledge them and say the Sale Manager can follow up.
 - If the visitor asks something unrelated to this business, use this exact reply: "${OFF_TOPIC_REPLY}"
 - If the visitor has not provided their name yet, ask for their name before deeper sales questions.
 - When you answer using an approved fact and the prompt is stale, include that the information was last updated ${promptAge.label}.
+- Set supportedByPrompt to true only when the reply is supported by one of the approved sources.
 - Keep replies concise, warm, and useful.
 
 Return only JSON with this shape:
@@ -263,6 +332,82 @@ Return only JSON with this shape:
       content: message
     }
   ];
+}
+
+function buildAutoKnowledgeMessages(payload, conversations) {
+  const channelName = String(payload?.channelName || "Selected channel").trim();
+  const botPrompt = String(payload?.botPrompt || "").trim();
+  const existingKnowledge = String(payload?.autoKnowledgePrompt || "").trim();
+
+  return [
+    {
+      role: "system",
+      content: `You are GLM 5.2 running Sale Assist's Auto Knowledges Learning audit.
+
+Your job is to update a channel learning prompt from conversations that have not been audited yet.
+
+Learning rules:
+- Only add durable business facts explicitly confirmed by the business owner, manager, staff, or existing approved prompts.
+- Do not learn facts from visitor guesses, visitor claims, or unanswered visitor questions.
+- Visitor questions may be summarized under "Open visitor questions" when they reveal what customers need answered.
+- Use the bot prompt only as context; do not copy general bot behavior instructions into Auto Knowledges Learning.
+- Prefer conversation-derived business facts and open questions over repeating existing channel instructions.
+- Preserve useful existing knowledge, remove duplicates, and keep the result concise.
+- If nothing reliable was learned, return the existing learning prompt unchanged.
+- Do not invent business details.
+
+Return only JSON with this shape:
+{
+  "autoKnowledgePrompt": "string",
+  "summary": "string"
+}`
+    },
+    {
+      role: "user",
+      content: `Channel: ${channelName}
+
+Approved bot prompt:
+${botPrompt || "(No bot prompt provided.)"}
+
+Existing Auto Knowledges Learning prompt:
+${existingKnowledge || "(No learned knowledge yet.)"}
+
+Unaudited or changed conversations:
+${conversations.map(formatConversationForKnowledge).join("\n\n")}`
+    }
+  ];
+}
+
+function formatConversationForKnowledge(conversation) {
+  const messages = Array.isArray(conversation?.messages)
+    ? conversation.messages
+    : [];
+  const lines = messages
+    .map((message) => {
+      const text = String(message?.text || "").replace(/\s+/g, " ").trim();
+
+      if (!text) {
+        return "";
+      }
+
+      return `${getKnowledgeRoleLabel(message?.role)}: ${text}`;
+    })
+    .filter(Boolean);
+
+  return `Conversation ${conversation?.id || "unknown"} (${conversation?.visitorName || "Visitor"}, last activity ${conversation?.lastActivityAt || "unknown"}):
+${lines.join("\n")}`;
+}
+
+function getKnowledgeRoleLabel(role) {
+  if (role === "owner") {
+    return "Business owner";
+  }
+
+  if (role === "visitor") {
+    return "Visitor";
+  }
+
+  return "Sale Assist bot";
 }
 
 function isManagerHandoff(reply) {
@@ -284,6 +429,10 @@ function hasBusinessTerm(message) {
   return [
     "price",
     "cost",
+    "fee",
+    "charge",
+    "pricing",
+    "quote",
     "ship",
     "shipping",
     "deliver",
@@ -292,6 +441,12 @@ function hasBusinessTerm(message) {
     "availability",
     "feature",
     "package",
+    "plan",
+    "subscription",
+    "setup",
+    "support",
+    "install",
+    "installation",
     "service",
     "product",
     "policy",
@@ -379,6 +534,32 @@ function parseModelDecision(content) {
         typeof parsed.reply === "string" && parsed.reply.trim()
           ? parsed.reply
           : fallback.reply
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function parseAutoKnowledgeUpdate(content, existingKnowledge) {
+  const fallback = {
+    autoKnowledgePrompt: existingKnowledge,
+    summary: "No reliable new knowledge was returned."
+  };
+
+  try {
+    const jsonText = String(content).match(/\{[\s\S]*\}/)?.[0];
+    const parsed = JSON.parse(jsonText || content);
+    const nextPrompt =
+      typeof parsed.autoKnowledgePrompt === "string"
+        ? parsed.autoKnowledgePrompt.trim()
+        : "";
+
+    return {
+      autoKnowledgePrompt: nextPrompt || existingKnowledge,
+      summary:
+        typeof parsed.summary === "string" && parsed.summary.trim()
+          ? parsed.summary.trim()
+          : "Auto Knowledges Learning was updated."
     };
   } catch {
     return fallback;

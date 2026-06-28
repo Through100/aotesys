@@ -98,6 +98,13 @@ button {
   background: #21595e;
 }
 
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  box-shadow: none;
+}
+
 .home-hero,
 .login-panel,
 .public-empty-state {
@@ -503,6 +510,11 @@ button {
   margin: auto 12px 12px;
 }
 
+.knowledge-editor {
+  display: grid;
+  gap: 10px;
+}
+
 .date-editor {
   display: grid;
   gap: 8px;
@@ -528,7 +540,8 @@ button {
   margin: 0;
 }
 
-.prompt-editor span {
+.prompt-editor span,
+.knowledge-heading > span {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -537,7 +550,8 @@ button {
   font-weight: 800;
 }
 
-.prompt-editor textarea {
+.prompt-editor textarea,
+.knowledge-editor textarea {
   width: 100%;
   min-height: 150px;
   resize: vertical;
@@ -550,6 +564,45 @@ button {
 
 .prompt-editor.expanded textarea {
   min-height: 260px;
+}
+
+.knowledge-editor.expanded textarea {
+  min-height: 190px;
+}
+
+.knowledge-heading,
+.knowledge-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #344148;
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.checkbox-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: #2f7d6d;
+}
+
+.audit-status,
+.knowledge-status {
+  margin: 0;
+  color: #657278;
+  font-size: 0.86rem;
+}
+
+.knowledge-status {
+  color: #285f54;
+  font-weight: 750;
 }
 
 .visitor-button {
@@ -788,6 +841,12 @@ button {
 
   .message {
     max-width: 90%;
+  }
+
+  .knowledge-heading,
+  .knowledge-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

@@ -181,6 +181,11 @@ button {
   opacity: 0.45;
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -498,6 +503,27 @@ button {
   margin: auto 12px 12px;
 }
 
+.date-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.date-editor span {
+  color: #3b464c;
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.date-editor input {
+  width: min(100%, 240px);
+  min-height: 44px;
+  border: 1px solid #cfdcd6;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #25313a;
+  background: #ffffff;
+}
+
 .prompt-editor.expanded {
   margin: 0;
 }
@@ -567,6 +593,21 @@ button {
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-panel {
+  border: 1px dashed #cad7d2;
+  border-radius: 8px;
+  padding: 14px;
+  color: #647176;
+  background: #fbfdfb;
+  font-size: 0.92rem;
 }
 
 .message-list {

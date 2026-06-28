@@ -1,4 +1,5 @@
 import {
+  Archive,
   Bot,
   Check,
   ChevronLeft,
@@ -18,11 +19,16 @@ import React, { useEffect, useMemo, useState } from "react";
 
 const AUTH_STORAGE_KEY = "sale-assist-auth";
 const CHANNELS_STORAGE_KEY = "sale-assist-channels";
+const UNSURE_MANAGER_REPLY =
+  "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
+const OFF_TOPIC_REPLY =
+  "I can only help with questions related to this business. If you have a business question, please send it here.";
 
 const initialChannels = [
   {
     id: "channel-a",
     name: "Channel A",
+    promptUpdatedAt: getTodayDate(),
     prompt:
       "You are Sale Assist. Greet visitors warmly, ask for their name, answer product questions clearly, and hand over to the business owner when needed.",
     conversations: [
@@ -31,6 +37,8 @@ const initialChannels = [
         visitorName: "Maria Lee",
         status: "Bot active",
         lastSeen: "2 min ago",
+        lastActivityAt: new Date(Date.now() - 120_000).toISOString(),
+        archived: false,
         messages: [
           {
             id: 1,
@@ -56,6 +64,8 @@ const initialChannels = [
         visitorName: "New visitor",
         status: "Waiting",
         lastSeen: "Just now",
+        lastActivityAt: new Date().toISOString(),
+        archived: false,
         messages: [
           {
             id: 1,
@@ -92,13 +102,56 @@ function getInitialChannels() {
     const parsedChannels = storedChannels ? JSON.parse(storedChannels) : null;
 
     if (Array.isArray(parsedChannels) && parsedChannels.length > 0) {
-      return parsedChannels;
+      return normalizeChannels(parsedChannels);
     }
   } catch {
-    return initialChannels;
+    return normalizeChannels(initialChannels);
   }
 
-  return initialChannels;
+  return normalizeChannels(initialChannels);
+}
+
+function normalizeChannels(channels) {
+  return channels.map((channel) => ({
+    ...channel,
+    promptUpdatedAt: channel.promptUpdatedAt || getTodayDate(),
+    conversations: (channel.conversations || []).map((conversation) => ({
+      ...conversation,
+      archived: Boolean(conversation.archived),
+      lastActivityAt:
+        conversation.lastActivityAt ||
+        deriveLastActivityAt(conversation.lastSeen)
+    }))
+  }));
+}
+
+function deriveLastActivityAt(lastSeen) {
+  if (lastSeen === "2 min ago") {
+    return new Date(Date.now() - 120_000).toISOString();
+  }
+
+  return new Date().toISOString();
+}
+
+function getTodayDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getNowIso() {
+  return new Date().toISOString();
+}
+
+function getSortedVisibleConversations(channel) {
+  return [...(channel?.conversations || [])]
+    .filter((conversation) => !conversation.archived)
+    .sort(
+      (left, right) =>
+        getConversationTime(right) - getConversationTime(left)
+    );
+}
+
+function getConversationTime(conversation) {
+  return Date.parse(conversation.lastActivityAt || "") || 0;
 }
 
 function getVisitorSessionId(channelId) {
@@ -156,6 +209,7 @@ async function requestBotReply(channel, conversation, text) {
     body: JSON.stringify({
       message: text,
       prompt: channel.prompt,
+      promptUpdatedAt: channel.promptUpdatedAt,
       visitorName: conversation.visitorName,
       history: conversation.messages
     })
@@ -165,13 +219,11 @@ async function requestBotReply(channel, conversation, text) {
     throw new Error("Ollama request failed.");
   }
 
-  const data = await response.json();
-  return data.reply;
+  return response.json();
 }
 
 function buildFallbackBotReply(text, visitorName, detectedName) {
   const lowerText = text.toLowerCase();
-  const name = detectedName || visitorName;
 
   if (!visitorName || visitorName === "Visitor") {
     if (detectedName) {
@@ -181,15 +233,51 @@ function buildFallbackBotReply(text, visitorName, detectedName) {
     return "Thanks. Before we continue, what should I call you?";
   }
 
-  if (lowerText.includes("price") || lowerText.includes("cost")) {
-    return `I can help with pricing, ${name}. Which product or service are you looking at?`;
+  if (hasContactDetail(text)) {
+    return "Thanks, I have your contact detail. The Sale Manager can follow up with you.";
   }
 
-  if (lowerText.includes("owner") || lowerText.includes("human")) {
-    return "I can keep helping here, and I will make this conversation easy for the owner to pick up.";
+  if (!isLikelyBusinessRelated(lowerText)) {
+    return OFF_TOPIC_REPLY;
   }
 
-  return `Thanks, ${name}. I can help with that. Tell me one more detail and I will point you in the right direction.`;
+  return UNSURE_MANAGER_REPLY;
+}
+
+function isLikelyBusinessRelated(lowerText) {
+  return [
+    "price",
+    "cost",
+    "ship",
+    "shipping",
+    "deliver",
+    "delivery",
+    "available",
+    "availability",
+    "feature",
+    "package",
+    "service",
+    "product",
+    "policy",
+    "refund",
+    "location",
+    "hours",
+    "book",
+    "appointment",
+    "business",
+    "sale",
+    "manager",
+    "buy",
+    "order"
+  ].some((term) => lowerText.includes(term));
+}
+
+function hasContactDetail(text) {
+  return /[^\s@]+@[^\s@]+\.[^\s@]+|\+?\d[\d\s().-]{6,}/.test(text);
+}
+
+function isManagerHandoffReply(text) {
+  return /unsure at the moment|preferred contact|sale manager/i.test(text);
 }
 
 export default function App() {
@@ -215,12 +303,17 @@ export default function App() {
     [channels, selectedChannelId]
   );
 
+  const visibleConversations = useMemo(
+    () => getSortedVisibleConversations(selectedChannel),
+    [selectedChannel]
+  );
+
   const selectedConversation = useMemo(
     () =>
-      selectedChannel?.conversations.find(
+      visibleConversations.find(
         (conversation) => conversation.id === selectedConversationId
-      ),
-    [selectedChannel, selectedConversationId]
+      ) || visibleConversations[0],
+    [selectedConversationId, visibleConversations]
   );
 
   const shareLink = `${window.location.origin}/chat/${selectedChannelId}`;
@@ -260,6 +353,7 @@ export default function App() {
     const nextChannel = {
       id,
       name: `Channel ${String.fromCharCode(64 + channelNumber)}`,
+      promptUpdatedAt: getTodayDate(),
       prompt:
         "Introduce yourself, collect the visitor name, answer sales questions, and alert the owner if the visitor is ready to buy.",
       conversations: [
@@ -268,6 +362,8 @@ export default function App() {
           visitorName: "New visitor",
           status: "Bot active",
           lastSeen: "New",
+          lastActivityAt: getNowIso(),
+          archived: false,
           messages: [
             {
               id: 1,
@@ -294,6 +390,16 @@ export default function App() {
     );
   };
 
+  const updatePromptUpdatedAt = (promptUpdatedAt) => {
+    setChannels((current) =>
+      current.map((channel) =>
+        channel.id === selectedChannelId
+          ? { ...channel, promptUpdatedAt }
+          : channel
+      )
+    );
+  };
+
   const sendOwnerReply = () => {
     if (!draftReply.trim() || !selectedConversation) {
       return;
@@ -315,6 +421,9 @@ export default function App() {
             return {
               ...conversation,
               status: "Owner joined",
+              lastSeen: "Just now",
+              lastActivityAt: getNowIso(),
+              archived: false,
               messages: [
                 ...conversation.messages,
                 {
@@ -339,9 +448,43 @@ export default function App() {
 
   const selectChannel = (id) => {
     const nextChannel = channels.find((channel) => channel.id === id);
+    const nextConversations = getSortedVisibleConversations(nextChannel);
+
     setSelectedChannelId(id);
-    setSelectedConversationId(nextChannel?.conversations[0]?.id ?? "");
+    setSelectedConversationId(nextConversations[0]?.id ?? "");
     setActiveTab("conversations");
+  };
+
+  const archiveConversation = (channelId, conversationId) => {
+    let nextSelectedConversationId = "";
+
+    setChannels((current) =>
+      current.map((channel) => {
+        if (channel.id !== channelId) {
+          return channel;
+        }
+
+        const conversations = channel.conversations.map((conversation) =>
+          conversation.id === conversationId
+            ? {
+                ...conversation,
+                archived: true,
+                status: "Archived",
+                lastActivityAt: getNowIso()
+              }
+            : conversation
+        );
+        nextSelectedConversationId =
+          getSortedVisibleConversations({ ...channel, conversations })[0]?.id ||
+          "";
+
+        return {
+          ...channel,
+          conversations
+        };
+      })
+    );
+    setSelectedConversationId(nextSelectedConversationId);
   };
 
   const ensureVisitorConversation = (channelId, conversationId) => {
@@ -365,6 +508,8 @@ export default function App() {
               visitorName: "Visitor",
               status: "Bot active",
               lastSeen: "Just now",
+              lastActivityAt: getNowIso(),
+              archived: false,
               messages: [
                 {
                   id: 1,
@@ -398,6 +543,7 @@ export default function App() {
               ...conversation,
               status,
               lastSeen: "Just now",
+              lastActivityAt: getNowIso(),
               messages: [
                 ...conversation.messages,
                 {
@@ -445,6 +591,8 @@ export default function App() {
               visitorName,
               status: "Bot typing",
               lastSeen: "Just now",
+              lastActivityAt: getNowIso(),
+              archived: false,
               messages: [
                 ...conversation.messages,
                 {
@@ -481,13 +629,20 @@ export default function App() {
         botContext.conversation,
         messageText
       );
-      appendBotMessage(channelId, conversationId, botReply, "Bot active");
+      appendBotMessage(
+        channelId,
+        conversationId,
+        botReply.reply,
+        botReply.needsManager ? "Needs manager" : "Bot active"
+      );
     } catch {
       appendBotMessage(
         channelId,
         conversationId,
         botContext.fallbackReply,
-        "Bot fallback"
+        isManagerHandoffReply(botContext.fallbackReply)
+          ? "Needs manager"
+          : "Bot fallback"
       );
     }
   };
@@ -617,15 +772,21 @@ export default function App() {
           <ConversationPanel
             selectedChannel={selectedChannel}
             selectedConversation={selectedConversation}
-            selectedConversationId={selectedConversationId}
+            conversations={visibleConversations}
             shareLink={shareLink}
             copied={copied}
             draftReply={draftReply}
             onConversationChange={setSelectedConversationId}
             onCopyShareLink={copyShareLink}
             onPromptChange={updatePrompt}
+            onPromptUpdatedAtChange={updatePromptUpdatedAt}
             onDraftReplyChange={setDraftReply}
             onSendOwnerReply={sendOwnerReply}
+            onArchiveConversation={() =>
+              selectedChannel &&
+              selectedConversation &&
+              archiveConversation(selectedChannel.id, selectedConversation.id)
+            }
           />
         )}
       </main>
@@ -854,15 +1015,17 @@ function ProfilePanel({ profile, setProfile }) {
 function ConversationPanel({
   selectedChannel,
   selectedConversation,
-  selectedConversationId,
+  conversations,
   shareLink,
   copied,
   draftReply,
   onConversationChange,
   onCopyShareLink,
   onPromptChange,
+  onPromptUpdatedAtChange,
   onDraftReplyChange,
-  onSendOwnerReply
+  onSendOwnerReply,
+  onArchiveConversation
 }) {
   const [conversationMode, setConversationMode] = useState("chats");
   const isSettingsMode = conversationMode === "settings";
@@ -918,6 +1081,20 @@ function ConversationPanel({
                 </div>
               </div>
 
+              <label className="date-editor">
+                <span>Prompt last updated</span>
+                <input
+                  type="date"
+                  value={selectedChannel?.promptUpdatedAt ?? getTodayDate()}
+                  onInput={(event) =>
+                    onPromptUpdatedAtChange(event.currentTarget.value)
+                  }
+                  onChange={(event) =>
+                    onPromptUpdatedAtChange(event.target.value)
+                  }
+                />
+              </label>
+
               <label className="prompt-editor expanded">
                 <span>
                   <Settings size={17} />
@@ -938,11 +1115,14 @@ function ConversationPanel({
             <h2>Visitors</h2>
           </div>
           <div className="visitor-list">
-            {selectedChannel?.conversations.map((conversation) => (
+            {conversations.length === 0 && (
+              <div className="empty-panel">No active conversations</div>
+            )}
+            {conversations.map((conversation) => (
               <button
                 key={conversation.id}
                 className={
-                  conversation.id === selectedConversationId
+                  conversation.id === selectedConversation?.id
                     ? "visitor-button active"
                     : "visitor-button"
                 }
@@ -962,12 +1142,28 @@ function ConversationPanel({
           <div className="chat-header">
             <div>
               <p className="eyebrow">{selectedChannel?.name}</p>
-              <h2>{selectedConversation?.visitorName}</h2>
+              <h2>{selectedConversation?.visitorName || "No active visitor"}</h2>
             </div>
-            <span className="status-pill">{selectedConversation?.status}</span>
+            <div className="chat-actions">
+              <span className="status-pill">
+                {selectedConversation?.status || "No active chat"}
+              </span>
+              <button
+                className="icon-button light"
+                onClick={onArchiveConversation}
+                title="Archive conversation"
+                aria-label="Archive conversation"
+                disabled={!selectedConversation}
+              >
+                <Archive size={18} />
+              </button>
+            </div>
           </div>
 
           <div className="message-list">
+            {!selectedConversation && (
+              <div className="empty-panel">Archived conversations are hidden.</div>
+            )}
             {selectedConversation?.messages.map((message) => (
               <div key={message.id} className={`message ${message.role}`}>
                 <span>{message.role === "bot" ? "Bot" : message.role === "owner" ? "Owner" : "Visitor"}</span>
@@ -992,6 +1188,7 @@ function ConversationPanel({
               onClick={onSendOwnerReply}
               title="Send owner reply"
               aria-label="Send owner reply"
+              disabled={!selectedConversation}
             >
               <Send size={19} />
             </button>

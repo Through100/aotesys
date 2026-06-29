@@ -30,6 +30,14 @@ Place production secrets in:
 The included PM2 ecosystem file defaults to `127.0.0.1:5174`. Point the
 `aotesys.com` virtual host or reverse proxy at that local port.
 
+For the current Apache layout, install the included vhost:
+
+```sh
+sudo install -o root -g root -m 0644 deploy/httpd/aotesys.com.conf /etc/httpd/sites-enabled.d/aotesys.com.conf
+sudo apachectl configtest
+sudo systemctl reload httpd
+```
+
 GitHub repository secrets:
 
 - `DEPLOY_HOST`

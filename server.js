@@ -48,7 +48,7 @@ if (isProduction) {
   const distPath = path.join(__dirname, "dist");
   app.use(express.static(distPath));
   app.use((request, response, next) => {
-    if (request.method !== "GET") {
+    if (!["GET", "HEAD"].includes(request.method)) {
       next();
       return;
     }

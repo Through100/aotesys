@@ -3,8 +3,8 @@ module.exports = {
     {
       name: "aotesys.com",
       cwd: "/var/www/vhosts/aotesys.com/current",
-      script: "server.js",
-      args: "--production",
+      script: "/usr/bin/node",
+      args: "server.js --production",
       instances: 1,
       exec_mode: "fork",
       watch: false,

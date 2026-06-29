@@ -1,7 +1,9 @@
 import {
+  ArrowRight,
   Archive,
   BookOpen,
   Bot,
+  Building2,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -14,13 +16,19 @@ import {
   Plus,
   RefreshCcw,
   Send,
+  Sparkles,
   Settings,
+  UserPlus,
   UserRound
 } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 
-const AUTH_STORAGE_KEY = "sale-assist-auth";
-const CHANNELS_STORAGE_KEY = "sale-assist-channels";
+const APP_NAME = "Aotesys";
+const APP_DOMAIN = "aotesys.com";
+const LEGACY_AUTH_STORAGE_KEY = "sale-assist-auth";
+const LEGACY_CHANNELS_STORAGE_KEY = "sale-assist-channels";
+const WORKSPACES_STORAGE_KEY = "aotesys-workspaces";
+const CURRENT_WORKSPACE_STORAGE_KEY = "aotesys-current-workspace";
 const UNSURE_MANAGER_REPLY =
   "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
 const OFF_TOPIC_REPLY =
@@ -94,6 +102,10 @@ function getRoute() {
     return { name: "home" };
   }
 
+  if (path === "/signup") {
+    return { name: "signup" };
+  }
+
   if (path.startsWith("/chat/")) {
     return {
       name: "public-chat",
@@ -104,13 +116,22 @@ function getRoute() {
   return { name: "login" };
 }
 
-function getInitialChannels() {
+function getInitialChannels(workspaceSlug) {
   try {
-    const storedChannels = window.localStorage.getItem(CHANNELS_STORAGE_KEY);
+    const storedChannels = window.localStorage.getItem(
+      getWorkspaceChannelsStorageKey(workspaceSlug)
+    );
     const parsedChannels = storedChannels ? JSON.parse(storedChannels) : null;
 
     if (Array.isArray(parsedChannels) && parsedChannels.length > 0) {
       return normalizeChannels(parsedChannels);
+    }
+
+    const legacyChannels = window.localStorage.getItem(LEGACY_CHANNELS_STORAGE_KEY);
+    const parsedLegacyChannels = legacyChannels ? JSON.parse(legacyChannels) : null;
+
+    if (Array.isArray(parsedLegacyChannels) && parsedLegacyChannels.length > 0) {
+      return normalizeChannels(parsedLegacyChannels);
     }
   } catch {
     return normalizeChannels(initialChannels);
@@ -152,6 +173,108 @@ function getTodayDate() {
 
 function getNowIso() {
   return new Date().toISOString();
+}
+
+function getStoredWorkspaces() {
+  try {
+    const storedWorkspaces = window.localStorage.getItem(WORKSPACES_STORAGE_KEY);
+    const parsedWorkspaces = storedWorkspaces
+      ? JSON.parse(storedWorkspaces)
+      : [];
+
+    if (Array.isArray(parsedWorkspaces)) {
+      return parsedWorkspaces
+        .filter((workspace) => workspace?.slug && workspace?.name)
+        .map((workspace) => ({
+          name: workspace.name,
+          slug: workspace.slug,
+          createdAt: workspace.createdAt || getNowIso()
+        }));
+    }
+  } catch {
+    return [];
+  }
+
+  return [];
+}
+
+function getInitialWorkspace() {
+  const workspaces = getStoredWorkspaces();
+  const hostSlug = getWorkspaceSlugFromHost();
+  const storedSlug = window.localStorage.getItem(CURRENT_WORKSPACE_STORAGE_KEY);
+  const selectedSlug = hostSlug || storedSlug;
+
+  if (selectedSlug) {
+    return (
+      workspaces.find((workspace) => workspace.slug === selectedSlug) || {
+        name: titleFromSlug(selectedSlug),
+        slug: selectedSlug,
+        createdAt: getNowIso()
+      }
+    );
+  }
+
+  if (workspaces[0]) {
+    return workspaces[0];
+  }
+
+  if (window.localStorage.getItem(LEGACY_AUTH_STORAGE_KEY) === "mock") {
+    return {
+      name: "Demo Workspace",
+      slug: "demo",
+      createdAt: getNowIso()
+    };
+  }
+
+  return null;
+}
+
+function getWorkspaceSlugFromHost() {
+  const hostname = window.location.hostname.toLowerCase();
+
+  if (
+    hostname === APP_DOMAIN ||
+    hostname === `www.${APP_DOMAIN}` ||
+    hostname === "localhost" ||
+    hostname === "127.0.0.1"
+  ) {
+    return "";
+  }
+
+  if (hostname.endsWith(`.${APP_DOMAIN}`)) {
+    return hostname.replace(`.${APP_DOMAIN}`, "");
+  }
+
+  return "";
+}
+
+function getWorkspaceChannelsStorageKey(workspaceSlug) {
+  return `aotesys-channels-${workspaceSlug || "default"}`;
+}
+
+function getWorkspaceAuthStorageKey(workspaceSlug) {
+  return `aotesys-auth-${workspaceSlug || "default"}`;
+}
+
+function getWorkspaceOrigin(workspaceSlug) {
+  return `https://${workspaceSlug}.${APP_DOMAIN}`;
+}
+
+function slugifyWorkspaceName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function titleFromSlug(slug) {
+  return String(slug || "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function getSortedVisibleConversations(channel) {
@@ -236,8 +359,8 @@ function getPluralLabel(count, label) {
   return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
-function getVisitorSessionId(channelId) {
-  const key = `sale-assist-visitor-${channelId}`;
+function getVisitorSessionId(workspaceSlug, channelId) {
+  const key = `aotesys-visitor-${workspaceSlug || "default"}-${channelId}`;
   const existingId = window.localStorage.getItem(key);
 
   if (existingId) {
@@ -377,14 +500,39 @@ function isManagerHandoffReply(text) {
 
 export default function App() {
   const [route, setRoute] = useState(getRoute);
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    () => window.localStorage.getItem(AUTH_STORAGE_KEY) === "mock"
-  );
+  const [workspaces, setWorkspaces] = useState(() => {
+    const storedWorkspaces = getStoredWorkspaces();
+    const initialWorkspace = getInitialWorkspace();
+
+    if (
+      initialWorkspace &&
+      !storedWorkspaces.some(
+        (workspace) => workspace.slug === initialWorkspace.slug
+      )
+    ) {
+      return [...storedWorkspaces, initialWorkspace];
+    }
+
+    return storedWorkspaces;
+  });
+  const [activeWorkspace, setActiveWorkspace] = useState(getInitialWorkspace);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    const workspace = getInitialWorkspace();
+
+    return Boolean(
+      workspace &&
+        (window.localStorage.getItem(getWorkspaceAuthStorageKey(workspace.slug)) ===
+          "mock" ||
+          window.localStorage.getItem(LEGACY_AUTH_STORAGE_KEY) === "mock")
+    );
+  });
   const [profile, setProfile] = useState({
     email: "owner@example.com",
-    businessName: ""
+    businessName: getInitialWorkspace()?.name || ""
   });
-  const [channels, setChannels] = useState(getInitialChannels);
+  const [channels, setChannels] = useState(() =>
+    getInitialChannels(getInitialWorkspace()?.slug)
+  );
   const [selectedChannelId, setSelectedChannelId] = useState("channel-a");
   const [selectedConversationId, setSelectedConversationId] =
     useState("maria-lee");
@@ -418,7 +566,9 @@ export default function App() {
     [selectedChannel]
   );
 
-  const shareLink = `${window.location.origin}/chat/${selectedChannelId}`;
+  const shareLink = activeWorkspace
+    ? `${getWorkspaceOrigin(activeWorkspace.slug)}/chat/${selectedChannelId}`
+    : `${window.location.origin}/chat/${selectedChannelId}`;
 
   useEffect(() => {
     const handlePopState = () => setRoute(getRoute());
@@ -428,28 +578,120 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(CHANNELS_STORAGE_KEY, JSON.stringify(channels));
-  }, [channels]);
+    window.localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (activeWorkspace) {
+      window.localStorage.setItem(
+        CURRENT_WORKSPACE_STORAGE_KEY,
+        activeWorkspace.slug
+      );
+      window.localStorage.setItem(
+        getWorkspaceChannelsStorageKey(activeWorkspace.slug),
+        JSON.stringify(channels)
+      );
+    }
+  }, [activeWorkspace, channels]);
 
   useEffect(() => {
     setKnowledgeAuditStatus("");
   }, [selectedChannelId]);
 
   const navigate = (nextRoute) => {
-    const path = nextRoute === "home" ? "/" : "/login";
+    const paths = {
+      home: "/",
+      login: "/login",
+      signup: "/signup"
+    };
+    const path = paths[nextRoute] || "/login";
     window.history.pushState(null, "", path);
     setRoute({ name: nextRoute });
   };
 
-  const loginWithMockFirebase = () => {
-    window.localStorage.setItem(AUTH_STORAGE_KEY, "mock");
+  const selectWorkspace = (workspace, nextChannels) => {
+    setActiveWorkspace(workspace);
+    setProfile((current) => ({
+      ...current,
+      businessName: workspace.name
+    }));
+    setChannels(nextChannels || getInitialChannels(workspace.slug));
+    setSelectedChannelId("channel-a");
+    setSelectedConversationId("maria-lee");
+    window.localStorage.setItem(CURRENT_WORKSPACE_STORAGE_KEY, workspace.slug);
+  };
+
+  const createWorkspace = (workspaceName) => {
+    const slug = slugifyWorkspaceName(workspaceName);
+
+    if (!slug) {
+      return {
+        ok: false,
+        message: "Add a workspace name to continue."
+      };
+    }
+
+    const workspace = {
+      name: workspaceName.trim(),
+      slug,
+      createdAt: getNowIso()
+    };
+
+    setWorkspaces((current) => {
+      const withoutDuplicate = current.filter((item) => item.slug !== slug);
+      return [...withoutDuplicate, workspace];
+    });
+    const workspaceChannels = normalizeChannels(initialChannels);
+
+    selectWorkspace(workspace, workspaceChannels);
+    window.localStorage.setItem(
+      getWorkspaceChannelsStorageKey(slug),
+      JSON.stringify(workspaceChannels)
+    );
+    window.localStorage.setItem(getWorkspaceAuthStorageKey(slug), "mock");
     setIsAuthenticated(true);
     setRoute({ name: "login" });
     window.history.pushState(null, "", "/login");
+
+    return {
+      ok: true,
+      workspace
+    };
+  };
+
+  const loginWithMockFirebase = (workspaceInput) => {
+    const requestedSlug =
+      slugifyWorkspaceName(workspaceInput) || activeWorkspace?.slug || "";
+    const workspace =
+      workspaces.find((item) => item.slug === requestedSlug) ||
+      (activeWorkspace?.slug === requestedSlug ? activeWorkspace : null);
+
+    if (!workspace) {
+      return {
+        ok: false,
+        message: "Workspace not found. Create it with Sign up first."
+      };
+    }
+
+    selectWorkspace(workspace);
+    window.localStorage.setItem(getWorkspaceAuthStorageKey(workspace.slug), "mock");
+    setIsAuthenticated(true);
+    setRoute({ name: "login" });
+    window.history.pushState(null, "", "/login");
+
+    return {
+      ok: true,
+      workspace
+    };
   };
 
   const logout = () => {
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    if (activeWorkspace) {
+      window.localStorage.removeItem(
+        getWorkspaceAuthStorageKey(activeWorkspace.slug)
+      );
+    }
+    window.localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
     setIsAuthenticated(false);
   };
 
@@ -879,6 +1121,7 @@ export default function App() {
       <PublicChatPage
         channel={publicChannel}
         channelId={route.channelId}
+        workspace={activeWorkspace}
         onNavigate={navigate}
         onEnsureConversation={ensureVisitorConversation}
         onSendVisitorMessage={sendVisitorMessage}
@@ -890,11 +1133,22 @@ export default function App() {
     return <HomePage onNavigate={navigate} />;
   }
 
+  if (route.name === "signup") {
+    return (
+      <SignupPage
+        onNavigate={navigate}
+        onCreateWorkspace={createWorkspace}
+      />
+    );
+  }
+
   if (!isAuthenticated) {
     return (
       <LoginPage
+        activeWorkspace={activeWorkspace}
         onNavigate={navigate}
         onLogin={loginWithMockFirebase}
+        workspaces={workspaces}
       />
     );
   }
@@ -911,7 +1165,9 @@ export default function App() {
           >
             <Home size={20} />
           </button>
-          {isSidebarOpen && <strong>Sale Assist</strong>}
+          {isSidebarOpen && (
+            <strong>{activeWorkspace?.name || APP_NAME}</strong>
+          )}
           <button
             className="icon-button edge"
             onClick={() => setIsSidebarOpen((open) => !open)}
@@ -1024,62 +1280,271 @@ export default function App() {
 }
 
 function HomePage({ onNavigate }) {
+  const [landingMessages, setLandingMessages] = useState([
+    {
+      role: "bot",
+      text:
+        "Hi, I am the Aotesys sales bot. Ask what this platform can do for a business website."
+    }
+  ]);
+  const [landingDraft, setLandingDraft] = useState("");
+
+  const sendLandingMessage = () => {
+    const message = landingDraft.trim();
+
+    if (!message) {
+      return;
+    }
+
+    const lowerMessage = message.toLowerCase();
+    let reply =
+      "Aotesys gives each business a workspace, shareable AI chat channels, owner handoff, and learned business knowledge for sales support.";
+
+    if (lowerMessage.includes("signup") || lowerMessage.includes("start")) {
+      reply =
+        "Create a workspace with your business name, then your workspace is available as a subdomain like online2book.aotesys.com.";
+    } else if (
+      lowerMessage.includes("share") ||
+      lowerMessage.includes("link") ||
+      lowerMessage.includes("subdomain")
+    ) {
+      reply =
+        "Every workspace creates share links from its own subdomain, so customer chats stay tied to that business.";
+    } else if (lowerMessage.includes("login")) {
+      reply =
+        "After signup, use Login and enter your workspace name to open the owner dashboard.";
+    }
+
+    setLandingMessages((current) => [
+      ...current,
+      { role: "visitor", text: message },
+      { role: "bot", text: reply }
+    ]);
+    setLandingDraft("");
+  };
+
   return (
     <div className="home-page">
       <header className="topbar">
         <button className="brand-button" onClick={() => onNavigate("home")}>
           <Bot size={22} />
-          <span>Sale Assist</span>
+          <span>{APP_NAME}</span>
         </button>
-        <button className="secondary-button" onClick={() => onNavigate("login")}>
-          <LogIn size={18} />
-          <span>Login</span>
-        </button>
+        <div className="topbar-actions">
+          <button className="secondary-button" onClick={() => onNavigate("login")}>
+            <LogIn size={18} />
+            <span>Login</span>
+          </button>
+          <button className="primary-button" onClick={() => onNavigate("signup")}>
+            <UserPlus size={18} />
+            <span>Sign up</span>
+          </button>
+        </div>
       </header>
 
       <section className="home-hero">
-        <p className="eyebrow">Customer chat dashboard</p>
-        <h1>Sale Assist</h1>
+        <p className="eyebrow">Sale support platform</p>
+        <h1>{APP_NAME}</h1>
         <p>
-          A simple place to create shareable chat channels, let the bot greet
-          visitors, and join the conversation when a real person is needed.
+          Aotesys gives each business a workspace for AI website inquiries,
+          shareable chat channels, owner replies, and approved knowledge the bot
+          can use safely.
         </p>
-        <button className="primary-button" onClick={() => onNavigate("login")}>
-          <LogIn size={19} />
-          <span>Open login</span>
-        </button>
+        <div className="hero-actions">
+          <button className="primary-button" onClick={() => onNavigate("signup")}>
+            <UserPlus size={19} />
+            <span>Create workspace</span>
+          </button>
+          <button className="secondary-button" onClick={() => onNavigate("login")}>
+            <LogIn size={18} />
+            <span>Workspace login</span>
+          </button>
+        </div>
+      </section>
+
+      <section className="landing-chat-section" aria-label="AI inquiry preview">
+        <div className="landing-copy">
+          <p className="eyebrow">Visitor inquiry</p>
+          <h2>Ask before you sign up</h2>
+          <p>
+            Visitors can ask an AI bot questions from the website. When the bot
+            is unsure, it collects contact details so the sale manager can reply
+            from the workspace.
+          </p>
+        </div>
+
+        <div className="landing-chat-preview">
+          <div className="chat-header">
+            <div>
+              <p className="eyebrow">aotesys.com</p>
+              <h2>Aotesys AI</h2>
+            </div>
+            <span className="status-pill">Online</span>
+          </div>
+          <div className="message-list landing-message-list">
+            {landingMessages.map((message, index) => (
+              <div key={`${message.role}-${index}`} className={`message ${message.role}`}>
+                <span>{message.role === "bot" ? "Bot" : "You"}</span>
+                <p>{message.text}</p>
+              </div>
+            ))}
+          </div>
+          <div className="reply-box">
+            <input
+              value={landingDraft}
+              placeholder="Ask about Aotesys..."
+              onChange={(event) => setLandingDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  sendLandingMessage();
+                }
+              }}
+            />
+            <button
+              className="primary-icon-button"
+              onClick={sendLandingMessage}
+              title="Send inquiry"
+              aria-label="Send inquiry"
+            >
+              <Send size={19} />
+            </button>
+          </div>
+        </div>
       </section>
     </div>
   );
 }
 
-function LoginPage({ onNavigate, onLogin }) {
+function SignupPage({ onNavigate, onCreateWorkspace }) {
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [message, setMessage] = useState("");
+  const previewSlug = slugifyWorkspaceName(workspaceName) || "your-business";
+
+  const submit = (event) => {
+    event.preventDefault();
+    const result = onCreateWorkspace(workspaceName);
+
+    if (!result.ok) {
+      setMessage(result.message);
+    }
+  };
+
   return (
     <div className="login-page">
       <header className="topbar">
         <button className="brand-button" onClick={() => onNavigate("home")}>
           <Bot size={22} />
-          <span>Sale Assist</span>
+          <span>{APP_NAME}</span>
         </button>
-        <button className="secondary-button" onClick={() => onNavigate("home")}>
-          <Home size={18} />
-          <span>Home</span>
-        </button>
+        <div className="topbar-actions">
+          <button className="secondary-button" onClick={() => onNavigate("home")}>
+            <Home size={18} />
+            <span>Home</span>
+          </button>
+          <button className="secondary-button" onClick={() => onNavigate("login")}>
+            <LogIn size={18} />
+            <span>Login</span>
+          </button>
+        </div>
       </header>
 
       <section className="login-panel">
         <div>
-          <p className="eyebrow">Firebase auth placeholder</p>
-          <h1>Login</h1>
+          <p className="eyebrow">Create workspace</p>
+          <h1>Sign up</h1>
           <p>
-            The real Firebase sign-in can be connected once the web app config
-            is available.
+            Name the workspace with the business name. Aotesys will turn it into
+            a workspace subdomain for the owner dashboard and visitor chat links.
           </p>
         </div>
-        <button className="primary-button" onClick={onLogin}>
-          <LogIn size={19} />
-          <span>Mock Firebase login</span>
+        <form className="auth-form" onSubmit={submit}>
+          <label>
+            <span>Workspace name</span>
+            <input
+              value={workspaceName}
+              placeholder="Online2Book"
+              onChange={(event) => setWorkspaceName(event.target.value)}
+            />
+          </label>
+          <div className="workspace-preview">
+            <Building2 size={18} />
+            <span>{previewSlug}.{APP_DOMAIN}</span>
+          </div>
+          {message && <p className="form-status">{message}</p>}
+          <button className="primary-button" type="submit">
+            <ArrowRight size={18} />
+            <span>Create workspace</span>
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function LoginPage({ activeWorkspace, onNavigate, onLogin, workspaces }) {
+  const [workspaceInput, setWorkspaceInput] = useState(
+    activeWorkspace?.slug || workspaces[0]?.slug || ""
+  );
+  const [message, setMessage] = useState("");
+
+  const submit = (event) => {
+    event.preventDefault();
+    const result = onLogin(workspaceInput);
+
+    if (!result.ok) {
+      setMessage(result.message);
+    }
+  };
+
+  return (
+    <div className="login-page">
+      <header className="topbar">
+        <button className="brand-button" onClick={() => onNavigate("home")}>
+          <Bot size={22} />
+          <span>{APP_NAME}</span>
         </button>
+        <div className="topbar-actions">
+          <button className="secondary-button" onClick={() => onNavigate("home")}>
+            <Home size={18} />
+            <span>Home</span>
+          </button>
+          <button className="primary-button" onClick={() => onNavigate("signup")}>
+            <UserPlus size={18} />
+            <span>Sign up</span>
+          </button>
+        </div>
+      </header>
+
+      <section className="login-panel">
+        <div>
+          <p className="eyebrow">Workspace access</p>
+          <h1>Login</h1>
+          <p>
+            Enter your workspace name or slug. For example, Online2Book opens as
+            online2book.{APP_DOMAIN}.
+          </p>
+        </div>
+        <form className="auth-form" onSubmit={submit}>
+          <label>
+            <span>Workspace</span>
+            <input
+              value={workspaceInput}
+              placeholder="online2book"
+              onChange={(event) => setWorkspaceInput(event.target.value)}
+            />
+          </label>
+          <div className="workspace-preview">
+            <Sparkles size={18} />
+            <span>
+              {slugifyWorkspaceName(workspaceInput) || "workspace"}.{APP_DOMAIN}
+            </span>
+          </div>
+          {message && <p className="form-status">{message}</p>}
+          <button className="primary-button" type="submit">
+            <LogIn size={19} />
+            <span>Open workspace</span>
+          </button>
+        </form>
       </section>
     </div>
   );
@@ -1088,11 +1553,14 @@ function LoginPage({ onNavigate, onLogin }) {
 function PublicChatPage({
   channel,
   channelId,
+  workspace,
   onNavigate,
   onEnsureConversation,
   onSendVisitorMessage
 }) {
-  const [visitorConversationId] = useState(() => getVisitorSessionId(channelId));
+  const [visitorConversationId] = useState(() =>
+    getVisitorSessionId(workspace?.slug, channelId)
+  );
   const [draftMessage, setDraftMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
 
@@ -1128,7 +1596,7 @@ function PublicChatPage({
         <header className="topbar">
           <button className="brand-button" onClick={() => onNavigate("home")}>
             <Bot size={22} />
-            <span>Sale Assist</span>
+            <span>{APP_NAME}</span>
           </button>
         </header>
 
@@ -1150,7 +1618,7 @@ function PublicChatPage({
       <header className="topbar">
         <button className="brand-button" onClick={() => onNavigate("home")}>
           <Bot size={22} />
-          <span>Sale Assist</span>
+          <span>{APP_NAME}</span>
         </button>
       </header>
 
@@ -1158,8 +1626,8 @@ function PublicChatPage({
         <section className="public-chat-panel">
           <div className="chat-header">
             <div>
-              <p className="eyebrow">{channel.name}</p>
-              <h2>Sale Assist</h2>
+              <p className="eyebrow">{workspace?.name || channel.name}</p>
+              <h2>Sale Support</h2>
             </div>
             <span className="status-pill">Bot active</span>
           </div>

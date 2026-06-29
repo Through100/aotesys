@@ -3,7 +3,8 @@
 #   sudo visudo -cf /etc/sudoers.d/loopy
 #
 # This allows the loopy SSH deploy user to run only the Aotesys deploy script
-# with the fixed release archive uploaded by CI.
+# with the fixed release archive uploaded by CI. It does not allow direct sudo
+# access to pm2, systemctl, shell, or other production apps.
 
 Defaults:loopy !requiretty
 loopy ALL=(root) NOPASSWD: /usr/local/sbin/aotesys-deploy /tmp/aotesys-release.tgz

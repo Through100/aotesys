@@ -32,6 +32,7 @@ jobs:
           tar -czf aotesys-release.tgz \
             dist \
             server.js \
+            ecosystem.config.cjs \
             package.json \
             package-lock.json \
             .env.example

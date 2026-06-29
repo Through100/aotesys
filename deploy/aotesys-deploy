@@ -6,7 +6,8 @@ APP_DIR="/var/www/vhosts/aotesys.com"
 RELEASES_DIR="$APP_DIR/releases"
 CURRENT_LINK="$APP_DIR/current"
 SHARED_DIR="$APP_DIR/shared"
-SERVICE_NAME="aotesys.service"
+PM2_NAME="aotesys.com"
+ECOSYSTEM_FILE="$CURRENT_LINK/ecosystem.config.cjs"
 
 if [[ "$ARCHIVE" != "/tmp/aotesys-release.tgz" ]]; then
   echo "Refusing unexpected release archive: $ARCHIVE" >&2
@@ -33,6 +34,7 @@ tar -xzf "$ARCHIVE" -C "$STAGING_DIR"
 
 test -d "$STAGING_DIR/dist"
 test -f "$STAGING_DIR/server.js"
+test -f "$STAGING_DIR/ecosystem.config.cjs"
 test -f "$STAGING_DIR/package.json"
 test -f "$STAGING_DIR/package-lock.json"
 
@@ -49,8 +51,8 @@ mv "$STAGING_DIR" "$TARGET_DIR"
 trap - EXIT
 ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
 
-systemctl restart "$SERVICE_NAME"
-systemctl --no-pager --full status "$SERVICE_NAME" >/dev/null
+pm2 startOrReload "$ECOSYSTEM_FILE" --only "$PM2_NAME" --update-env
+pm2 describe "$PM2_NAME" >/dev/null
 
 find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +6 | xargs -r rm -rf
 rm -f "$ARCHIVE"

@@ -14,16 +14,21 @@ sudo mkdir -p /var/www/vhosts/aotesys.com/shared
 sudo install -o root -g root -m 0755 deploy/aotesys-deploy /usr/local/sbin/aotesys-deploy
 sudo install -o root -g root -m 0440 deploy/sudoers.d/loopy /etc/sudoers.d/loopy
 sudo visudo -cf /etc/sudoers.d/loopy
-sudo install -o root -g root -m 0644 deploy/aotesys.service /etc/systemd/system/aotesys.service
-sudo systemctl daemon-reload
-sudo systemctl enable aotesys.service
 ```
+
+The deploy script uses PM2 and only starts or reloads the process named
+`aotesys.com`. It does not run `pm2 restart all`, and it does not touch the
+existing `/var/www/vhosts/oceanviewholidaypark` or
+`/var/www/vhosts/PublicPatrol-WebUI` applications.
 
 Place production secrets in:
 
 ```sh
 /var/www/vhosts/aotesys.com/shared/.env
 ```
+
+The included PM2 ecosystem file defaults to `127.0.0.1:5174`. Point the
+`aotesys.com` virtual host or reverse proxy at that local port.
 
 GitHub repository secrets:
 

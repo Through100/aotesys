@@ -12,7 +12,7 @@ build:
   script:
     - npm ci
     - npm run build
-    - tar -czf aotesys-release.tgz dist server.js ecosystem.config.cjs package.json package-lock.json .env.example
+    - tar -czf aotesys-release.tgz dist src/seoContent.js server.js ecosystem.config.cjs package.json package-lock.json .env.example
   artifacts:
     expire_in: 1 day
     paths:

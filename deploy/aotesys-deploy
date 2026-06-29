@@ -34,6 +34,7 @@ trap cleanup EXIT
 tar -xzf "$ARCHIVE" -C "$STAGING_DIR"
 
 test -d "$STAGING_DIR/dist"
+test -f "$STAGING_DIR/src/seoContent.js"
 test -f "$STAGING_DIR/server.js"
 test -f "$STAGING_DIR/ecosystem.config.cjs"
 test -f "$STAGING_DIR/package.json"

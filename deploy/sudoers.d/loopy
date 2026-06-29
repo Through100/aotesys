@@ -1,0 +1,9 @@
+# Install this file on the server as /etc/sudoers.d/loopy with mode 0440.
+# Validate before use:
+#   sudo visudo -cf /etc/sudoers.d/loopy
+#
+# This allows the loopy SSH deploy user to run only the Aotesys deploy script
+# with the fixed release archive uploaded by CI.
+
+Defaults:loopy !requiretty
+loopy ALL=(root) NOPASSWD: /usr/local/sbin/aotesys-deploy /tmp/aotesys-release.tgz

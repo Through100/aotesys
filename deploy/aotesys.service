@@ -1,0 +1,21 @@
+[Unit]
+Description=Aotesys web app
+After=network.target
+
+[Service]
+Type=simple
+User=loopy
+Group=loopy
+WorkingDirectory=/var/www/vhosts/aotesys.com/current
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=5173
+EnvironmentFile=-/var/www/vhosts/aotesys.com/shared/.env
+ExecStart=/usr/bin/node server.js --production
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

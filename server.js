@@ -67,7 +67,7 @@ if (isProduction) {
 }
 
 app.listen(port, host, () => {
-  console.log(`Sale Assist running at http://${host}:${port}/`);
+  console.log(`Aotesys running at http://${host}:${port}/`);
 });
 
 function loadEnvFile(envPath) {

@@ -1,0 +1,6 @@
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+deploy/aotesys-deploy text eol=lf
+deploy/aotesys.service text eol=lf
+deploy/sudoers.d/* text eol=lf

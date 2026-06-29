@@ -1,0 +1,45 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  DEPLOY_USER: "loopy"
+  DEPLOY_PORT: "22"
+
+build:
+  stage: build
+  image: node:22-bookworm
+  script:
+    - npm ci
+    - npm run build
+    - tar -czf aotesys-release.tgz dist server.js package.json package-lock.json .env.example
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - aotesys-release.tgz
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+deploy:
+  stage: deploy
+  image: debian:bookworm-slim
+  needs:
+    - job: build
+      artifacts: true
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends ca-certificates openssh-client
+    - mkdir -p ~/.ssh
+    - printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+  script:
+    - scp -P "$DEPLOY_PORT" aotesys-release.tgz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/aotesys-release.tgz"
+    - ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'sudo /usr/local/sbin/aotesys-deploy /tmp/aotesys-release.tgz'
+  environment:
+    name: production
+    url: https://aotesys.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'

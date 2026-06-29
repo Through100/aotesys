@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARCHIVE="${1:?Usage: aotesys-deploy /tmp/aotesys-release.tgz}"
+APP_DIR="/var/www/vhosts/aotesys.com"
+RELEASES_DIR="$APP_DIR/releases"
+CURRENT_LINK="$APP_DIR/current"
+SHARED_DIR="$APP_DIR/shared"
+SERVICE_NAME="aotesys.service"
+
+if [[ "$ARCHIVE" != "/tmp/aotesys-release.tgz" ]]; then
+  echo "Refusing unexpected release archive: $ARCHIVE" >&2
+  exit 2
+fi
+
+if [[ ! -f "$ARCHIVE" ]]; then
+  echo "Release archive not found: $ARCHIVE" >&2
+  exit 2
+fi
+
+mkdir -p "$RELEASES_DIR" "$SHARED_DIR"
+
+RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
+STAGING_DIR="$(mktemp -d "$APP_DIR/.staging-$RELEASE_ID-XXXXXX")"
+TARGET_DIR="$RELEASES_DIR/$RELEASE_ID"
+
+cleanup() {
+  rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT
+
+tar -xzf "$ARCHIVE" -C "$STAGING_DIR"
+
+test -d "$STAGING_DIR/dist"
+test -f "$STAGING_DIR/server.js"
+test -f "$STAGING_DIR/package.json"
+test -f "$STAGING_DIR/package-lock.json"
+
+if [[ -f "$SHARED_DIR/.env" ]]; then
+  ln -sfn "$SHARED_DIR/.env" "$STAGING_DIR/.env"
+fi
+
+(
+  cd "$STAGING_DIR"
+  npm ci --omit=dev
+)
+
+mv "$STAGING_DIR" "$TARGET_DIR"
+trap - EXIT
+ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
+
+systemctl restart "$SERVICE_NAME"
+systemctl --no-pager --full status "$SERVICE_NAME" >/dev/null
+
+find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +6 | xargs -r rm -rf
+rm -f "$ARCHIVE"
+
+echo "Aotesys deployed to $TARGET_DIR"

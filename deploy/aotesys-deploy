@@ -50,9 +50,10 @@ fi
 
 mv "$STAGING_DIR" "$TARGET_DIR"
 trap - EXIT
+chmod -R a+rX "$TARGET_DIR"
 ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
 
-"$PM2_BIN" startOrReload "$ECOSYSTEM_FILE" --only "$PM2_NAME" --update-env
+NODE_ENV=production "$PM2_BIN" startOrReload "$ECOSYSTEM_FILE" --only "$PM2_NAME" --update-env
 "$PM2_BIN" describe "$PM2_NAME" >/dev/null
 
 find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +6 | xargs -r rm -rf

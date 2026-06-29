@@ -1,0 +1,20 @@
+# Aotesys
+
+> Aotesys is an AI sales assistant workspace platform for small businesses. It helps website visitors ask sales questions, lets the assistant answer from approved business knowledge, and hands uncertain questions to the business owner.
+
+Author: Karry Lim
+Contact: hello@aotesys.com
+Updated: 2026-06-29
+
+## Key Pages
+
+- [Aotesys home](https://aotesys.com/): Product overview for AI sales assistant workspaces.
+- [Features](https://aotesys.com/features): AI chat channels, approved knowledge, workspace subdomains, and owner handoff.
+- [Resources](https://aotesys.com/resources): Guides written by Karry Lim about safer AI sales conversations.
+- [AI sales assistant guide](https://aotesys.com/resources/ai-sales-assistant-guide): Practical guide for handling website inquiries without inventing facts.
+- [About](https://aotesys.com/about): Background, author information, and product principles.
+- [Contact](https://aotesys.com/contact): Product and support contact details.
+
+## Suggested Summary
+
+Aotesys provides focused AI sales support for business websites. Each business can create a workspace, configure channel prompts, share public chat links, review visitor conversations, and hand off uncertain questions to a human manager.

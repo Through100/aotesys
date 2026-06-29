@@ -3,6 +3,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { createServer as createViteServer } from "vite";
+import {
+  DEFAULT_IMAGE,
+  SITE_URL,
+  getCanonicalUrl,
+  getPageMetadataByName,
+  getPageMetadataByPath,
+  getRouteNameByPath,
+  getStructuredData
+} from "./src/seoContent.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction =
@@ -18,7 +27,14 @@ const OFF_TOPIC_REPLY =
 loadEnvFile(path.join(__dirname, ".env"));
 
 const app = express();
+app.disable("x-powered-by");
+app.set("trust proxy", true);
 app.use(express.json({ limit: "1mb" }));
+
+if (isProduction) {
+  app.use(applyProductionHeaders);
+  app.use(redirectCanonicalHost);
+}
 
 app.post("/api/chat", async (request, response) => {
   try {
@@ -46,14 +62,21 @@ app.post("/api/auto-knowledge", async (request, response) => {
 
 if (isProduction) {
   const distPath = path.join(__dirname, "dist");
-  app.use(express.static(distPath));
+  app.use(express.static(distPath, { index: false }));
   app.use((request, response, next) => {
     if (!["GET", "HEAD"].includes(request.method)) {
       next();
       return;
     }
 
-    response.sendFile(path.join(distPath, "index.html"));
+    const metadata = getPageMetadataByPath(request.path);
+    const routeName = metadata ? getRouteNameByPath(request.path) : "not-found";
+    const statusCode = metadata ? 200 : 404;
+
+    response
+      .status(statusCode)
+      .type("html")
+      .send(renderIndexForRoute(distPath, routeName));
   });
 } else {
   const vite = await createViteServer({
@@ -69,6 +92,118 @@ if (isProduction) {
 app.listen(port, host, () => {
   console.log(`Aotesys running at http://${host}:${port}/`);
 });
+
+function applyProductionHeaders(request, response, next) {
+  response.setHeader(
+    "Strict-Transport-Security",
+    "max-age=63072000; includeSubDomains; preload"
+  );
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "SAMEORIGIN");
+  response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  response.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=()"
+  );
+  response.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+  );
+  next();
+}
+
+function redirectCanonicalHost(request, response, next) {
+  const hostHeader = String(request.headers.host || "").toLowerCase();
+  const hostname = hostHeader.split(":")[0];
+
+  if (hostname === "www.aotesys.com") {
+    response.redirect(301, `https://aotesys.com${request.originalUrl}`);
+    return;
+  }
+
+  next();
+}
+
+function renderIndexForRoute(distPath, routeName) {
+  const indexPath = path.join(distPath, "index.html");
+  const metadata = getPageMetadataByName(routeName);
+  const canonicalUrl = getCanonicalUrl(routeName);
+  const imageUrl = `${SITE_URL}${DEFAULT_IMAGE}`;
+  const structuredData = JSON.stringify(getStructuredData(routeName)).replace(
+    /</g,
+    "\\u003c"
+  );
+
+  let html = readFileSync(indexPath, "utf8");
+  html = html.replace(
+    /<title>[\s\S]*?<\/title>/i,
+    `<title>${escapeHtml(metadata.title)}</title>`
+  );
+  html = replaceMetaTag(html, "name", "description", metadata.description);
+  html = replaceMetaTag(
+    html,
+    "name",
+    "robots",
+    metadata.indexable ? "index, follow" : "noindex, follow"
+  );
+  html = replaceMetaTag(html, "property", "og:type", routeName === "guide" ? "article" : "website");
+  html = replaceMetaTag(html, "property", "og:title", metadata.title);
+  html = replaceMetaTag(html, "property", "og:description", metadata.description);
+  html = replaceMetaTag(html, "property", "og:url", canonicalUrl);
+  html = replaceMetaTag(html, "property", "og:image", imageUrl);
+  html = replaceMetaTag(html, "name", "twitter:title", metadata.title);
+  html = replaceMetaTag(html, "name", "twitter:description", metadata.description);
+  html = replaceMetaTag(html, "name", "twitter:image", imageUrl);
+  html = replaceCanonicalLink(html, canonicalUrl);
+  html = html.replace(
+    /<script\b(?=[^>]*\bid=["']structured-data["'])[^>]*>[\s\S]*?<\/script>/i,
+    `<script id="structured-data" type="application/ld+json">${structuredData}</script>`
+  );
+
+  return html;
+}
+
+function replaceMetaTag(html, attribute, key, content) {
+  const pattern = new RegExp(
+    `<meta\\b(?=[^>]*\\b${attribute}=["']${escapeRegExp(key)}["'])[^>]*>`,
+    "i"
+  );
+  const tag = `<meta ${attribute}="${key}" content="${escapeHtmlAttribute(
+    content
+  )}">`;
+
+  if (pattern.test(html)) {
+    return html.replace(pattern, tag);
+  }
+
+  return html.replace("</head>", `    ${tag}\n  </head>`);
+}
+
+function replaceCanonicalLink(html, href) {
+  const tag = `<link rel="canonical" href="${escapeHtmlAttribute(href)}">`;
+  const pattern = /<link\b(?=[^>]*\brel=["']canonical["'])[^>]*>/i;
+
+  if (pattern.test(html)) {
+    return html.replace(pattern, tag);
+  }
+
+  return html.replace("</head>", `    ${tag}\n  </head>`);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttribute(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function loadEnvFile(envPath) {
   if (!existsSync(envPath)) {

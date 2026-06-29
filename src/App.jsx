@@ -1,27 +1,49 @@
 import {
   ArrowRight,
   Archive,
+  BadgeCheck,
   BookOpen,
   Bot,
+  Brain,
   Building2,
+  CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
   Copy,
+  FileText,
+  Globe2,
   Home,
   Link2,
   LogIn,
+  Mail,
   MessageCircle,
   MessagesSquare,
   Plus,
   RefreshCcw,
   Send,
+  ShieldCheck,
   Sparkles,
   Settings,
+  Target,
   UserPlus,
-  UserRound
+  UserRound,
+  Workflow
 } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
+import {
+  AUTHOR_EMAIL,
+  AUTHOR_NAME,
+  DEFAULT_IMAGE,
+  FOOTER_LINKS,
+  MARKETING_NAV,
+  SITE_URL,
+  getCanonicalUrl,
+  getPageMetadataByName,
+  getRouteNameByPath,
+  getStructuredData,
+  normalizePathname
+} from "./seoContent.js";
 
 const APP_NAME = "Aotesys";
 const APP_DOMAIN = "aotesys.com";
@@ -33,6 +55,15 @@ const UNSURE_MANAGER_REPLY =
   "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
 const OFF_TOPIC_REPLY =
   "I can only help with questions related to this business. If you have a business question, please send it here.";
+const MARKETING_ROUTE_NAMES = new Set([
+  "features",
+  "resources",
+  "guide",
+  "about",
+  "contact",
+  "privacy",
+  "terms"
+]);
 
 const initialChannels = [
   {
@@ -96,14 +127,10 @@ const initialChannels = [
 ];
 
 function getRoute() {
-  const path = window.location.pathname;
+  const path = normalizePathname(window.location.pathname);
 
   if (path === "/") {
     return { name: "home" };
-  }
-
-  if (path === "/signup") {
-    return { name: "signup" };
   }
 
   if (path.startsWith("/chat/")) {
@@ -113,7 +140,71 @@ function getRoute() {
     };
   }
 
-  return { name: "login" };
+  return { name: getRouteNameByPath(path) };
+}
+
+function updateDocumentMetadata(routeName) {
+  const metadata = getPageMetadataByName(routeName);
+  const canonicalUrl = getCanonicalUrl(routeName);
+  const imageUrl = `${SITE_URL}${DEFAULT_IMAGE}`;
+
+  document.title = metadata.title;
+  setMetaTag("name", "description", metadata.description);
+  setMetaTag(
+    "name",
+    "robots",
+    metadata.indexable ? "index, follow" : "noindex, follow"
+  );
+  setMetaTag("name", "author", AUTHOR_NAME);
+  setMetaTag("property", "og:site_name", APP_NAME);
+  setMetaTag("property", "og:type", routeName === "guide" ? "article" : "website");
+  setMetaTag("property", "og:title", metadata.title);
+  setMetaTag("property", "og:description", metadata.description);
+  setMetaTag("property", "og:url", canonicalUrl);
+  setMetaTag("property", "og:image", imageUrl);
+  setMetaTag("name", "twitter:card", "summary_large_image");
+  setMetaTag("name", "twitter:title", metadata.title);
+  setMetaTag("name", "twitter:description", metadata.description);
+  setMetaTag("name", "twitter:image", imageUrl);
+  setCanonicalLink(canonicalUrl);
+  setStructuredData(routeName);
+}
+
+function setMetaTag(attribute, key, content) {
+  let element = document.head.querySelector(`meta[${attribute}="${key}"]`);
+
+  if (!element) {
+    element = document.createElement("meta");
+    element.setAttribute(attribute, key);
+    document.head.appendChild(element);
+  }
+
+  element.setAttribute("content", content);
+}
+
+function setCanonicalLink(href) {
+  let element = document.head.querySelector('link[rel="canonical"]');
+
+  if (!element) {
+    element = document.createElement("link");
+    element.setAttribute("rel", "canonical");
+    document.head.appendChild(element);
+  }
+
+  element.setAttribute("href", href);
+}
+
+function setStructuredData(routeName) {
+  let element = document.head.querySelector("#structured-data");
+
+  if (!element) {
+    element = document.createElement("script");
+    element.id = "structured-data";
+    element.type = "application/ld+json";
+    document.head.appendChild(element);
+  }
+
+  element.textContent = JSON.stringify(getStructuredData(routeName));
 }
 
 function getInitialChannels(workspaceSlug) {
@@ -578,6 +669,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    updateDocumentMetadata(route.name);
+  }, [route.name]);
+
+  useEffect(() => {
     window.localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
   }, [workspaces]);
 
@@ -599,12 +694,7 @@ export default function App() {
   }, [selectedChannelId]);
 
   const navigate = (nextRoute) => {
-    const paths = {
-      home: "/",
-      login: "/login",
-      signup: "/signup"
-    };
-    const path = paths[nextRoute] || "/login";
+    const path = getPageMetadataByName(nextRoute)?.path || "/login";
     window.history.pushState(null, "", path);
     setRoute({ name: nextRoute });
   };
@@ -1133,6 +1223,10 @@ export default function App() {
     return <HomePage onNavigate={navigate} />;
   }
 
+  if (MARKETING_ROUTE_NAMES.has(route.name)) {
+    return <MarketingPage routeName={route.name} onNavigate={navigate} />;
+  }
+
   if (route.name === "signup") {
     return (
       <SignupPage
@@ -1140,6 +1234,10 @@ export default function App() {
         onCreateWorkspace={createWorkspace}
       />
     );
+  }
+
+  if (route.name === "not-found") {
+    return <NotFoundPage onNavigate={navigate} />;
   }
 
   if (!isAuthenticated) {
@@ -1279,6 +1377,185 @@ export default function App() {
   );
 }
 
+const homeStats = [
+  { value: "1", label: "workspace per business" },
+  { value: "24/7", label: "first-response coverage" },
+  { value: "0", label: "guessed business facts" }
+];
+
+const featureCards = [
+  {
+    icon: MessagesSquare,
+    title: "Website inquiry channels",
+    text:
+      "Create separate AI chat channels for products, services, campaigns, or locations. Each channel keeps its own prompt, share link, and visitor conversations."
+  },
+  {
+    icon: ShieldCheck,
+    title: "Approved knowledge only",
+    text:
+      "The assistant is designed to answer from approved prompts and learned owner facts, then hand off when the answer is not known."
+  },
+  {
+    icon: UserRound,
+    title: "Owner handoff",
+    text:
+      "When a visitor is ready to buy or asks something uncertain, Aotesys collects contact details and keeps the conversation ready for the manager."
+  },
+  {
+    icon: Workflow,
+    title: "Workspace subdomains",
+    text:
+      "Business chat links stay organized under workspace subdomains such as online2book.aotesys.com, so customer entry points are easy to share."
+  },
+  {
+    icon: Brain,
+    title: "Auto Knowledges Learning",
+    text:
+      "New conversation evidence can be reviewed and converted into safer channel knowledge, helping the assistant improve without inventing claims."
+  },
+  {
+    icon: BadgeCheck,
+    title: "Sales-ready context",
+    text:
+      "Visitor names, timestamps, message history, and conversation status are kept in one dashboard so follow-up starts with context instead of guesswork."
+  }
+];
+
+const operatingPrinciples = [
+  "Ask for the visitor name before deeper selling.",
+  "Answer only from approved business facts.",
+  "Hand off questions that need human judgement.",
+  "Keep every conversation visible to the business owner.",
+  "Make public chat links easy to copy, share, and trace."
+];
+
+const useCases = [
+  {
+    title: "Service businesses",
+    text:
+      "Use Aotesys to answer package, booking, location, and service-fit questions before a visitor leaves the website."
+  },
+  {
+    title: "Product sellers",
+    text:
+      "Collect buyer intent, product questions, delivery concerns, and quote requests in a channel the owner can review."
+  },
+  {
+    title: "New websites",
+    text:
+      "Launch with clear sales support, contact capture, and a simple path from curiosity to a managed conversation."
+  }
+];
+
+const guideSections = [
+  {
+    title: "Start with the problem, not the bot",
+    paragraphs: [
+      "Most small business websites lose visitors because the visitor has one practical question and cannot find a quick answer. The question might be about pricing, availability, booking steps, delivery, support, or whether the service is suitable for a specific situation. Aotesys is built around that moment. The assistant should reduce friction for the visitor while protecting the business from made-up answers.",
+      "That means the goal is not to make the bot sound clever. The goal is to keep the first conversation moving. The assistant should greet the visitor, ask for a name, answer from approved facts when possible, and ask for contact details when a human reply is needed."
+    ]
+  },
+  {
+    title: "Separate approved facts from open questions",
+    paragraphs: [
+      "A useful sales assistant needs a clear boundary between what the business has approved and what the visitor is asking. If a channel prompt says delivery takes three days, the assistant can use that. If a visitor asks about a custom discount that has never been approved, the assistant should not guess.",
+      "This is why Aotesys includes channel prompts and Auto Knowledges Learning. The business can review real conversations, identify repeat questions, and turn reliable owner answers into future knowledge. The assistant improves, but the source of truth stays visible."
+    ]
+  },
+  {
+    title: "Design the handoff before the first lead arrives",
+    paragraphs: [
+      "A handoff is not a failure. In sales support, it is often the highest-value moment. The assistant should know when to stop answering and collect the detail a manager needs to follow up. A clear handoff message is better than a confident wrong answer.",
+      "The best workflow is simple: identify the visitor, understand the question, answer when the approved information is enough, and collect an email or phone number when the visitor needs a human response. The owner dashboard should preserve the full conversation so the next reply feels personal."
+    ]
+  },
+  {
+    title: "Measure trust, not just automation",
+    paragraphs: [
+      "Good automation earns trust by staying consistent. For a website, that means the assistant should be available, focused on the business, and honest when it is unsure. It should not drift into unrelated topics or invent policies, prices, stock levels, or guarantees.",
+      "Aotesys keeps that trust visible through channel settings, prompt dates, archived conversations, and owner replies. The result is a practical system for sales conversations, not a black box that quietly changes what the business says."
+    ]
+  }
+];
+
+function RouteLink({ route, className, children, onNavigate, title }) {
+  const metadata = getPageMetadataByName(route);
+
+  return (
+    <a
+      className={className}
+      href={metadata.path}
+      title={title}
+      onClick={(event) => {
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+
+        event.preventDefault();
+        onNavigate(route);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+function MarketingHeader({ onNavigate }) {
+  return (
+    <header className="topbar marketing-topbar">
+      <RouteLink route="home" className="brand-button" onNavigate={onNavigate}>
+        <Bot size={22} />
+        <span>{APP_NAME}</span>
+      </RouteLink>
+      <nav className="marketing-nav" aria-label="Public pages">
+        {MARKETING_NAV.map((item) => (
+          <RouteLink key={item.route} route={item.route} onNavigate={onNavigate}>
+            {item.label}
+          </RouteLink>
+        ))}
+      </nav>
+      <div className="topbar-actions">
+        <RouteLink route="login" className="secondary-button" onNavigate={onNavigate}>
+          <LogIn size={18} />
+          <span>Login</span>
+        </RouteLink>
+        <RouteLink route="signup" className="primary-button" onNavigate={onNavigate}>
+          <UserPlus size={18} />
+          <span>Sign up</span>
+        </RouteLink>
+      </div>
+    </header>
+  );
+}
+
+function MarketingFooter({ onNavigate }) {
+  return (
+    <footer className="marketing-footer">
+      <div>
+        <strong>{APP_NAME}</strong>
+        <p>
+          AI sales assistant workspaces, written and maintained by {AUTHOR_NAME}.
+        </p>
+      </div>
+      <nav aria-label="Footer">
+        {FOOTER_LINKS.map((item) => (
+          <RouteLink key={item.route} route={item.route} onNavigate={onNavigate}>
+            {item.label}
+          </RouteLink>
+        ))}
+      </nav>
+    </footer>
+  );
+}
+
 function HomePage({ onNavigate }) {
   const [landingMessages, setLandingMessages] = useState([
     {
@@ -1324,53 +1601,61 @@ function HomePage({ onNavigate }) {
   };
 
   return (
-    <div className="home-page">
-      <header className="topbar">
-        <button className="brand-button" onClick={() => onNavigate("home")}>
-          <Bot size={22} />
-          <span>{APP_NAME}</span>
-        </button>
-        <div className="topbar-actions">
-          <button className="secondary-button" onClick={() => onNavigate("login")}>
-            <LogIn size={18} />
-            <span>Login</span>
-          </button>
-          <button className="primary-button" onClick={() => onNavigate("signup")}>
-            <UserPlus size={18} />
-            <span>Sign up</span>
-          </button>
-        </div>
-      </header>
+    <div className="home-page marketing-page">
+      <MarketingHeader onNavigate={onNavigate} />
 
       <section className="home-hero">
-        <p className="eyebrow">Sale support platform</p>
+        <p className="eyebrow">AI sales assistant workspaces</p>
         <h1>{APP_NAME}</h1>
         <p>
-          Aotesys gives each business a workspace for AI website inquiries,
-          shareable chat channels, owner replies, and approved knowledge the bot
-          can use safely.
+          Aotesys helps small businesses turn website questions into organized
+          sales conversations. Each business gets a workspace, shareable AI chat
+          channels, owner replies, and approved knowledge the assistant can use
+          without drifting into guesses.
         </p>
         <div className="hero-actions">
-          <button className="primary-button" onClick={() => onNavigate("signup")}>
+          <RouteLink route="signup" className="primary-button" onNavigate={onNavigate}>
             <UserPlus size={19} />
             <span>Create workspace</span>
-          </button>
-          <button className="secondary-button" onClick={() => onNavigate("login")}>
+          </RouteLink>
+          <RouteLink route="features" className="secondary-button hero-secondary" onNavigate={onNavigate}>
+            <Sparkles size={18} />
+            <span>Explore features</span>
+          </RouteLink>
+          <RouteLink route="login" className="secondary-button hero-secondary" onNavigate={onNavigate}>
             <LogIn size={18} />
             <span>Workspace login</span>
-          </button>
+          </RouteLink>
+        </div>
+        <div className="hero-stat-row" aria-label="Aotesys product facts">
+          {homeStats.map((stat) => (
+            <div key={stat.label}>
+              <strong>{stat.value}</strong>
+              <span>{stat.label}</span>
+            </div>
+          ))}
         </div>
       </section>
 
       <section className="landing-chat-section" aria-label="AI inquiry preview">
         <div className="landing-copy">
           <p className="eyebrow">Visitor inquiry</p>
-          <h2>Ask before you sign up</h2>
+          <h2>Answer useful questions, then hand off the rest</h2>
           <p>
-            Visitors can ask an AI bot questions from the website. When the bot
-            is unsure, it collects contact details so the sale manager can reply
-            from the workspace.
+            Aotesys is made for the practical questions that arrive before a
+            customer buys: pricing, availability, packages, booking steps, and
+            service fit. The assistant can respond from approved business facts.
+            When the answer is missing, it asks for contact details so the sales
+            manager can reply from the workspace.
           </p>
+          <ul className="check-list">
+            {operatingPrinciples.slice(0, 3).map((item) => (
+              <li key={item}>
+                <Check size={18} />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
         </div>
 
         <div className="landing-chat-preview">
@@ -1411,6 +1696,551 @@ function HomePage({ onNavigate }) {
           </div>
         </div>
       </section>
+
+      <section className="content-band" aria-labelledby="homepage-features">
+        <div className="section-heading compact">
+          <p className="eyebrow">What Aotesys does</p>
+          <h2 id="homepage-features">A practical sales layer for a business website</h2>
+          <p>
+            The product is intentionally focused. It does not try to replace a
+            sales manager, CRM, or full support desk. It captures the first
+            website conversation, keeps approved information close to the bot,
+            and gives the owner a clear place to continue the conversation.
+          </p>
+        </div>
+        <div className="feature-grid">
+          {featureCards.slice(0, 3).map((feature) => {
+            const Icon = feature.icon;
+
+            return (
+              <article className="feature-card" key={feature.title}>
+                <Icon size={23} />
+                <h3>{feature.title}</h3>
+                <p>{feature.text}</p>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="content-band two-column-band" aria-labelledby="homepage-author">
+        <div>
+          <p className="eyebrow">Author and product lead</p>
+          <h2 id="homepage-author">Built and written by {AUTHOR_NAME}</h2>
+          <p>
+            I write Aotesys content from the point of view of a product builder:
+            keep the assistant useful, keep the source of truth visible, and keep
+            human follow-up close when a visitor is ready to buy. The site now
+            includes product, trust, contact, and policy pages so search engines
+            and AI answer engines can understand what Aotesys is.
+          </p>
+        </div>
+        <div className="author-panel">
+          <BadgeCheck size={24} />
+          <strong>{AUTHOR_NAME}</strong>
+          <span>{AUTHOR_EMAIL}</span>
+          <p>
+            Product author for Aotesys AI sales assistant workspaces.
+          </p>
+        </div>
+      </section>
+
+      <MarketingFooter onNavigate={onNavigate} />
+    </div>
+  );
+}
+
+function MarketingPage({ routeName, onNavigate }) {
+  if (routeName === "features") {
+    return <FeaturesPage onNavigate={onNavigate} />;
+  }
+
+  if (routeName === "resources") {
+    return <ResourcesPage onNavigate={onNavigate} />;
+  }
+
+  if (routeName === "guide") {
+    return <GuidePage onNavigate={onNavigate} />;
+  }
+
+  if (routeName === "about") {
+    return <AboutPage onNavigate={onNavigate} />;
+  }
+
+  if (routeName === "contact") {
+    return <ContactPage onNavigate={onNavigate} />;
+  }
+
+  if (routeName === "privacy") {
+    return <PolicyPage routeName="privacy" onNavigate={onNavigate} />;
+  }
+
+  return <PolicyPage routeName="terms" onNavigate={onNavigate} />;
+}
+
+function MarketingShell({ routeName, eyebrow, title, children, onNavigate }) {
+  const metadata = getPageMetadataByName(routeName);
+
+  return (
+    <div className="home-page marketing-page">
+      <MarketingHeader onNavigate={onNavigate} />
+      <main className="marketing-main">
+        <section className="page-hero">
+          <p className="eyebrow">{eyebrow}</p>
+          <h1>{title || metadata.navLabel}</h1>
+          <p>{metadata.description}</p>
+          <div className="byline-row">
+            <span>
+              <UserRound size={16} />
+              {AUTHOR_NAME}
+            </span>
+            <span>
+              <CalendarDays size={16} />
+              Updated Jun 29, 2026
+            </span>
+          </div>
+        </section>
+        {children}
+      </main>
+      <MarketingFooter onNavigate={onNavigate} />
+    </div>
+  );
+}
+
+function FeaturesPage({ onNavigate }) {
+  return (
+    <MarketingShell
+      routeName="features"
+      eyebrow="Product features"
+      title="AI sales support with a human fallback"
+      onNavigate={onNavigate}
+    >
+      <section className="content-band">
+        <div className="feature-grid wide">
+          {featureCards.map((feature) => {
+            const Icon = feature.icon;
+
+            return (
+              <article className="feature-card" key={feature.title}>
+                <Icon size={23} />
+                <h2>{feature.title}</h2>
+                <p>{feature.text}</p>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="content-band two-column-band">
+        <div>
+          <p className="eyebrow">How the workflow fits together</p>
+          <h2>From public question to managed follow-up</h2>
+          <p>
+            Aotesys starts at the public website chat link. A visitor asks a
+            question, the assistant checks whether approved channel knowledge
+            contains the answer, and the conversation is saved for the owner.
+            If the answer is not available, the assistant collects contact
+            details instead of inventing a reply.
+          </p>
+          <p>
+            This keeps the sales motion simple for small businesses. The owner
+            can update prompts, review conversation history, archive completed
+            leads, and convert reliable owner answers into future assistant
+            knowledge.
+          </p>
+        </div>
+        <ol className="process-list">
+          <li>
+            <span>1</span>
+            <p>Create a workspace with the business name.</p>
+          </li>
+          <li>
+            <span>2</span>
+            <p>Set the channel prompt and share the public chat link.</p>
+          </li>
+          <li>
+            <span>3</span>
+            <p>Let the assistant answer from approved facts.</p>
+          </li>
+          <li>
+            <span>4</span>
+            <p>Use owner handoff for uncertain or high-intent questions.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section className="content-band">
+        <div className="section-heading compact">
+          <p className="eyebrow">Use cases</p>
+          <h2>Where Aotesys is useful first</h2>
+        </div>
+        <div className="feature-grid">
+          {useCases.map((item) => (
+            <article className="feature-card" key={item.title}>
+              <Target size={22} />
+              <h3>{item.title}</h3>
+              <p>{item.text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="cta-band">
+        <div>
+          <p className="eyebrow">Ready to try it</p>
+          <h2>Create a workspace and test the flow</h2>
+          <p>
+            Start with one channel, one approved prompt, and one public chat
+            link. That is enough to see how Aotesys handles live website
+            questions.
+          </p>
+        </div>
+        <RouteLink route="signup" className="primary-button" onNavigate={onNavigate}>
+          <UserPlus size={18} />
+          <span>Create workspace</span>
+        </RouteLink>
+      </section>
+    </MarketingShell>
+  );
+}
+
+function ResourcesPage({ onNavigate }) {
+  return (
+    <MarketingShell
+      routeName="resources"
+      eyebrow="Resources"
+      title="Guides for safer AI sales conversations"
+      onNavigate={onNavigate}
+    >
+      <section className="content-band">
+        <div className="resource-list">
+          <RouteLink
+            route="guide"
+            className="resource-card"
+            onNavigate={onNavigate}
+            title="Read the AI sales assistant guide"
+          >
+            <FileText size={24} />
+            <div>
+              <p className="eyebrow">Guide</p>
+              <h2>How an AI sales assistant should handle website inquiries</h2>
+              <p>
+                A practical guide by {AUTHOR_NAME} on approved facts, visitor
+                names, safe handoff, and conversation learning.
+              </p>
+              <span>Read guide</span>
+            </div>
+          </RouteLink>
+        </div>
+      </section>
+
+      <section className="content-band two-column-band">
+        <div>
+          <p className="eyebrow">Editorial approach</p>
+          <h2>Content written from product practice</h2>
+          <p>
+            The Aotesys resource library is intentionally focused on small
+            business sales support. Future articles will cover prompt updates,
+            owner handoff scripts, channel design, and how to review customer
+            conversations without adding unreliable facts to the assistant.
+          </p>
+        </div>
+        <div className="author-panel">
+          <BookOpen size={24} />
+          <strong>Author: {AUTHOR_NAME}</strong>
+          <span>Updated Jun 29, 2026</span>
+          <p>
+            Every guide should help a business owner make the assistant more
+            useful while keeping human accountability close.
+          </p>
+        </div>
+      </section>
+    </MarketingShell>
+  );
+}
+
+function GuidePage({ onNavigate }) {
+  return (
+    <MarketingShell
+      routeName="guide"
+      eyebrow="Aotesys guide"
+      title="How an AI sales assistant should handle website inquiries"
+      onNavigate={onNavigate}
+    >
+      <article className="article-layout">
+        <p className="article-intro">
+          A website sales assistant should feel fast to the visitor and careful
+          to the business owner. The visitor wants a useful answer now. The
+          business needs the answer to be accurate, on-brand, and traceable. The
+          Aotesys approach is to answer only from approved facts, then hand off
+          the conversation when the question needs a person.
+        </p>
+
+        {guideSections.map((section) => (
+          <section key={section.title}>
+            <h2>{section.title}</h2>
+            {section.paragraphs.map((paragraph) => (
+              <p key={paragraph}>{paragraph}</p>
+            ))}
+          </section>
+        ))}
+
+        <section>
+          <h2>A simple checklist for the first Aotesys channel</h2>
+          <ul className="check-list article-checks">
+            {operatingPrinciples.map((item) => (
+              <li key={item}>
+                <Check size={18} />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+          <p>
+            This checklist is small on purpose. A sales assistant becomes useful
+            when the workflow is repeatable. Start with the common visitor
+            questions, give the assistant only facts the business owner is happy
+            to stand behind, and let the owner handle the questions that still
+            need judgement.
+          </p>
+        </section>
+      </article>
+    </MarketingShell>
+  );
+}
+
+function AboutPage({ onNavigate }) {
+  return (
+    <MarketingShell
+      routeName="about"
+      eyebrow="About Aotesys"
+      title="Built for practical website sales support"
+      onNavigate={onNavigate}
+    >
+      <section className="content-band two-column-band">
+        <div>
+          <h2>Why Aotesys exists</h2>
+          <p>
+            Aotesys exists because many small business websites have the same
+            problem: visitors arrive with buying intent, but the business owner
+            is not always available to answer the first question. A contact form
+            can feel slow. A generic chatbot can feel risky. Aotesys sits in the
+            middle with a narrow, practical job.
+          </p>
+          <p>
+            The platform gives each business a workspace, channels for different
+            sales entry points, a public chat link, and a place for the owner to
+            continue the conversation. It is designed to keep the assistant
+            useful without letting it make up policies, prices, guarantees, or
+            availability.
+          </p>
+          <p>
+            The public Aotesys content is written by {AUTHOR_NAME}. The product
+            position is straightforward: AI can help a business respond faster,
+            but the source of truth still belongs to the business owner.
+          </p>
+        </div>
+        <div className="author-panel">
+          <Globe2 size={24} />
+          <strong>{APP_DOMAIN}</strong>
+          <span>Author: {AUTHOR_NAME}</span>
+          <p>
+            Aotesys is presented as a focused AI sales assistant workspace for
+            business websites, public chat links, and owner-managed handoff.
+          </p>
+        </div>
+      </section>
+
+      <section className="content-band">
+        <div className="section-heading compact">
+          <p className="eyebrow">Principles</p>
+          <h2>What the product should keep doing</h2>
+        </div>
+        <div className="feature-grid">
+          {operatingPrinciples.map((item) => (
+            <article className="feature-card" key={item}>
+              <Check size={22} />
+              <h3>{item}</h3>
+              <p>
+                This principle keeps the assistant useful for visitors and
+                accountable for business owners.
+              </p>
+            </article>
+          ))}
+        </div>
+      </section>
+    </MarketingShell>
+  );
+}
+
+function ContactPage({ onNavigate }) {
+  return (
+    <MarketingShell
+      routeName="contact"
+      eyebrow="Contact"
+      title="Ask about Aotesys workspaces"
+      onNavigate={onNavigate}
+    >
+      <section className="content-band two-column-band">
+        <div>
+          <h2>Contact {AUTHOR_NAME}</h2>
+          <p>
+            Use this page for product questions, workspace setup help, feature
+            requests, partnership ideas, and corrections to public Aotesys
+            content. If you are testing Aotesys for a business, include the
+            workspace name, the channel you are using, and the visitor question
+            you want the assistant to handle better.
+          </p>
+          <p>
+            Aotesys is most useful when the business owner has clear product,
+            service, pricing, booking, delivery, or policy information ready to
+            approve. If any of that information is still missing, the assistant
+            can be configured to collect contact details and hand the question
+            back to the manager.
+          </p>
+          <a className="contact-link" href={`mailto:${AUTHOR_EMAIL}`}>
+            <Mail size={20} />
+            {AUTHOR_EMAIL}
+          </a>
+        </div>
+        <div className="contact-panel">
+          <h2>Helpful details to include</h2>
+          <ul className="check-list">
+            <li>
+              <Check size={18} />
+              <span>Your business or workspace name.</span>
+            </li>
+            <li>
+              <Check size={18} />
+              <span>The website page or chat link where the issue happened.</span>
+            </li>
+            <li>
+              <Check size={18} />
+              <span>The exact question a visitor asked.</span>
+            </li>
+            <li>
+              <Check size={18} />
+              <span>The approved answer the assistant should use.</span>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </MarketingShell>
+  );
+}
+
+function PolicyPage({ routeName, onNavigate }) {
+  const isPrivacy = routeName === "privacy";
+
+  return (
+    <MarketingShell
+      routeName={routeName}
+      eyebrow={isPrivacy ? "Privacy" : "Terms"}
+      title={isPrivacy ? "Privacy Policy" : "Terms of Service"}
+      onNavigate={onNavigate}
+    >
+      <article className="article-layout policy-layout">
+        {isPrivacy ? <PrivacyContent /> : <TermsContent />}
+      </article>
+    </MarketingShell>
+  );
+}
+
+function PrivacyContent() {
+  return (
+    <>
+      <section>
+        <h2>Overview</h2>
+        <p>
+          This privacy policy explains how Aotesys handles information submitted
+          through the website, workspace signup, owner login, and public chat
+          links. Aotesys is designed for business inquiry handling, so the
+          information collected may include names, contact details, visitor
+          messages, workspace names, channel prompts, and conversation history.
+        </p>
+      </section>
+      <section>
+        <h2>Information used by the assistant</h2>
+        <p>
+          Workspace owners can provide approved prompts and business knowledge so
+          the assistant can answer visitor questions. Visitor messages may be
+          stored in the workspace so the owner can reply, archive the
+          conversation, or review common questions. Aotesys should not be used to
+          collect sensitive personal information that is not needed for a sales
+          or support conversation.
+        </p>
+      </section>
+      <section>
+        <h2>Contact and corrections</h2>
+        <p>
+          To ask about privacy, request a correction, or report content that
+          should be removed from a workspace conversation, contact {AUTHOR_NAME}
+          at {AUTHOR_EMAIL}. Include enough context to identify the relevant
+          workspace or public chat link.
+        </p>
+      </section>
+    </>
+  );
+}
+
+function TermsContent() {
+  return (
+    <>
+      <section>
+        <h2>Use of Aotesys</h2>
+        <p>
+          Aotesys provides AI sales assistant workspaces for business websites.
+          Workspace owners are responsible for the accuracy of prompts, approved
+          business information, public chat links, and follow-up messages sent to
+          visitors. The assistant is a sales support tool and should not be
+          treated as legal, financial, medical, or safety advice.
+        </p>
+      </section>
+      <section>
+        <h2>Approved facts and handoff</h2>
+        <p>
+          The platform is designed to answer from approved business facts and
+          hand off uncertain questions to a manager. Workspace owners should
+          review prompts regularly, remove outdated claims, and avoid asking the
+          assistant to invent prices, policies, availability, guarantees, or
+          other material business details.
+        </p>
+      </section>
+      <section>
+        <h2>Availability and changes</h2>
+        <p>
+          Aotesys may change as the product improves. Features, workflows, and
+          public content can be updated by {AUTHOR_NAME}. If you have questions
+          about these terms or about responsible use of an Aotesys workspace,
+          contact {AUTHOR_EMAIL}.
+        </p>
+      </section>
+    </>
+  );
+}
+
+function NotFoundPage({ onNavigate }) {
+  return (
+    <div className="home-page marketing-page">
+      <MarketingHeader onNavigate={onNavigate} />
+      <main className="public-empty-state not-found-state">
+        <p className="eyebrow">404</p>
+        <h1>Page not found</h1>
+        <p>
+          This Aotesys URL does not point to a live page. Use the public pages
+          below to find the product, resource, contact, and policy information.
+        </p>
+        <div className="hero-actions">
+          <RouteLink route="home" className="primary-button" onNavigate={onNavigate}>
+            <Home size={18} />
+            <span>Home</span>
+          </RouteLink>
+          <RouteLink route="contact" className="secondary-button" onNavigate={onNavigate}>
+            <Mail size={18} />
+            <span>Contact</span>
+          </RouteLink>
+        </div>
+      </main>
+      <MarketingFooter onNavigate={onNavigate} />
     </div>
   );
 }

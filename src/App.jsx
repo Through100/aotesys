@@ -72,6 +72,58 @@ const MARKETING_ROUTE_NAMES = new Set([
   "terms"
 ]);
 
+const OWNER_SETUP_STEPS = [
+  {
+    key: "business-overview",
+    question:
+      "First, what does the business do? One or two plain sentences is enough.",
+    missingPrompt:
+      "Can you add a little more about what the business actually does, who it helps, and what outcome customers want?",
+    followUp: (answer) =>
+      mentionsAny(answer, ["customer", "client", "people", "business", "owner"])
+        ? "Good. What is the most common reason someone contacts you first?"
+        : "Who is the ideal customer for this business?"
+  },
+  {
+    key: "products-services",
+    question:
+      "What are the main products or services customers can ask about?",
+    missingPrompt:
+      "Can you list the main products or services by name, even if it is just a rough list?",
+    followUp: (answer) =>
+      mentionsAny(answer, ["price", "package", "plan", "$", "cost"])
+        ? "Which product or service should I recommend first when a visitor is unsure?"
+        : "Are there prices, packages, options, or availability details I can safely mention?"
+  },
+  {
+    key: "booking-buying",
+    question:
+      "How should a customer buy, book, order, or start with you?",
+    missingPrompt:
+      "What is the next step I should guide a customer toward: call, email, booking link, quote request, checkout, or something else?",
+    followUp: () =>
+      "What details should I collect before handing the customer to you?"
+  },
+  {
+    key: "policies",
+    question:
+      "What policies should I know before answering customers?",
+    missingPrompt:
+      "Please add the most important rules: delivery, refunds, cancellations, service area, opening hours, payment, warranty, or anything customers often misunderstand.",
+    followUp: () =>
+      "Is there anything I should never promise without checking with you first?"
+  },
+  {
+    key: "faq-dump",
+    question:
+      "Do you have any existing FAQ/Q&A, website copy, product notes, or old customer answers to paste in?",
+    missingPrompt:
+      "If you have a Q&A dump, paste it here. If not, tell me the top three questions customers usually ask.",
+    followUp: () =>
+      "Any answer here that has changed recently or conflicts with older information?"
+  }
+];
+
 const initialChannels = [
   {
     id: "channel-a",
@@ -478,58 +530,6 @@ function appendLearnedKnowledge(existingKnowledge, learnedFact) {
 
   return [cleanExisting, cleanFact].filter(Boolean).join("\n\n");
 }
-
-const OWNER_SETUP_STEPS = [
-  {
-    key: "business-overview",
-    question:
-      "First, what does the business do? One or two plain sentences is enough.",
-    missingPrompt:
-      "Can you add a little more about what the business actually does, who it helps, and what outcome customers want?",
-    followUp: (answer) =>
-      mentionsAny(answer, ["customer", "client", "people", "business", "owner"])
-        ? "Good. What is the most common reason someone contacts you first?"
-        : "Who is the ideal customer for this business?"
-  },
-  {
-    key: "products-services",
-    question:
-      "What are the main products or services customers can ask about?",
-    missingPrompt:
-      "Can you list the main products or services by name, even if it is just a rough list?",
-    followUp: (answer) =>
-      mentionsAny(answer, ["price", "package", "plan", "$", "cost"])
-        ? "Which product or service should I recommend first when a visitor is unsure?"
-        : "Are there prices, packages, options, or availability details I can safely mention?"
-  },
-  {
-    key: "booking-buying",
-    question:
-      "How should a customer buy, book, order, or start with you?",
-    missingPrompt:
-      "What is the next step I should guide a customer toward: call, email, booking link, quote request, checkout, or something else?",
-    followUp: () =>
-      "What details should I collect before handing the customer to you?"
-  },
-  {
-    key: "policies",
-    question:
-      "What policies should I know before answering customers?",
-    missingPrompt:
-      "Please add the most important rules: delivery, refunds, cancellations, service area, opening hours, payment, warranty, or anything customers often misunderstand.",
-    followUp: () =>
-      "Is there anything I should never promise without checking with you first?"
-  },
-  {
-    key: "faq-dump",
-    question:
-      "Do you have any existing FAQ/Q&A, website copy, product notes, or old customer answers to paste in?",
-    missingPrompt:
-      "If you have a Q&A dump, paste it here. If not, tell me the top three questions customers usually ask.",
-    followUp: () =>
-      "Any answer here that has changed recently or conflicts with older information?"
-  }
-];
 
 function mentionsAny(value, terms) {
   const lowerValue = String(value || "").toLowerCase();
@@ -1186,7 +1186,15 @@ export default function App() {
           email: user.email || currentProfile.email
         }));
       } else {
-        setIsAuthenticated(false);
+        const workspace = getInitialWorkspace();
+        const hasMockWorkspaceAuth =
+          workspace &&
+          window.localStorage.getItem(getWorkspaceAuthStorageKey(workspace.slug)) ===
+            "mock";
+        const hasLegacyMockAuth =
+          window.localStorage.getItem(LEGACY_AUTH_STORAGE_KEY) === "mock";
+
+        setIsAuthenticated(Boolean(hasMockWorkspaceAuth || hasLegacyMockAuth));
         setIsCloudReady(false);
       }
     });

@@ -1393,11 +1393,14 @@ Your job is to update a channel learning prompt from conversations that have not
 
 Learning rules:
 - Only add durable business facts explicitly confirmed by the business owner, manager, staff, or existing approved prompts.
+- Treat owner-pasted FAQ/Q&A dumps, website copy, product notes, and old customer-answer documents as owner-approved source material.
+- Preserve useful Q&A pairs as reusable receptionist knowledge, rewriting only for clarity and removing duplicates.
 - Do not learn facts from visitor guesses, visitor claims, or unanswered visitor questions.
 - Visitor questions may be summarized under "Open visitor questions" when they reveal what customers need answered.
 - Use the bot prompt only as context; do not copy general bot behavior instructions into Auto Knowledges Learning.
 - Prefer conversation-derived business facts and open questions over repeating existing channel instructions.
-- Preserve useful existing knowledge, remove duplicates, and keep the result concise.
+- Preserve useful existing knowledge, remove duplicates, and keep the result concise but complete enough for a receptionist to answer future visitors.
+- When an owner answer conflicts with existing knowledge, keep the newest owner-confirmed answer and note that it replaces the older detail.
 - If nothing reliable was learned, return the existing learning prompt unchanged.
 - Do not invent business details.
 

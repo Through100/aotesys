@@ -501,7 +501,7 @@ function buildOwnerSetupConversation(channelId, channelName, now = getNowIso()) 
         text: [
           `Let's set up ${channelName} before customers arrive.`,
           "Tell me what the business does, what products or services you sell, who the ideal customer is, pricing or booking basics, service area, hours, delivery or refund rules, and the top questions customers usually ask.",
-          "A rough answer is fine. I will turn it into receptionist knowledge and ask follow-up questions where details are missing."
+          "You can also paste or dump your existing FAQ/Q&A, website copy, product notes, or old customer answers here. I will treat it as owner-approved source material, turn it into receptionist knowledge, and ask follow-up questions where details are missing."
         ].join("\n\n")
       }
     ]
@@ -512,20 +512,20 @@ function buildOwnerSetupFollowUp(ownerAnswer, learnedCount) {
   if (learnedCount <= 1) {
     return [
       "Thanks, I have saved that as starter receptionist knowledge.",
-      "Next, what are the main products or services customers ask about, and what should I say about pricing, packages, availability, or booking?"
+      "Next, you can paste a Q&A dump if you already have one. Otherwise, tell me the main products or services customers ask about, and what I should say about pricing, packages, availability, or booking."
     ].join("\n\n");
   }
 
   if (learnedCount === 2) {
     return [
       "Good, I have added those details.",
-      "What policies should I know before answering customers? For example delivery, refunds, appointment changes, warranty, service area, opening hours, payment methods, or when I should ask for contact details."
+      "If you have more Q&A, paste it in. What policies should I know before answering customers? For example delivery, refunds, appointment changes, warranty, service area, opening hours, payment methods, or when I should ask for contact details."
     ].join("\n\n");
   }
 
   return [
     "Got it. I have updated the receptionist knowledge.",
-    "Any common customer objections, follow-up questions, or things I should never promise? If something changed from an earlier answer, tell me which version is correct."
+    "Any more FAQ entries, common customer objections, follow-up questions, or things I should never promise? If something changed from an earlier answer, tell me which version is correct."
   ].join("\n\n");
 }
 
@@ -1449,7 +1449,7 @@ export default function App() {
 
         if (learningRequest?.type === "owner-setup") {
           const now = getNowIso();
-          const learnedFact = `Owner setup answer: ${ownerAnswer}`;
+          const learnedFact = `Owner-approved setup knowledge or Q&A:\n${ownerAnswer}`;
           const nextKnowledge = appendLearnedKnowledge(
             channel.autoKnowledgePrompt,
             learnedFact

@@ -147,6 +147,103 @@ app.get("/api/workspaces/:workspaceSlug/channels", async (request, response) => 
   }
 });
 
+app.get(
+  "/api/public/workspaces/:workspaceSlug/channels/:channelId",
+  (request, response) => {
+    try {
+      const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
+      const channelId = sanitizeChannelId(request.params.channelId);
+      const workspaceRecord = requirePublicWorkspace(workspaceSlug);
+      const channel = requirePublicChannel(workspaceSlug, channelId);
+
+      response.json({
+        workspace: normalizeWorkspaceRecord(workspaceRecord),
+        channel: toPublicChannelPayload(channel)
+      });
+    } catch (error) {
+      sendFirebaseError(response, error);
+    }
+  }
+);
+
+app.post(
+  "/api/public/workspaces/:workspaceSlug/channels/:channelId/conversations/:conversationId/messages",
+  async (request, response) => {
+    try {
+      const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
+      const channelId = sanitizeChannelId(request.params.channelId);
+      const conversationId = sanitizeConversationId(request.params.conversationId);
+      const message = String(request.body?.message || "").trim();
+
+      if (!message) {
+        throwBadRequest("Message is required.");
+      }
+
+      const workspaceRecord = requirePublicWorkspace(workspaceSlug);
+      const channels = getWorkspaceChannels(workspaceSlug);
+      const channelIndex = channels.findIndex((channel) => channel.id === channelId);
+
+      if (channelIndex === -1) {
+        throwNotFound("Channel not found.");
+      }
+
+      const now = new Date().toISOString();
+      let channel = channels[channelIndex];
+      let conversation = getOrCreatePublicConversation(channel, conversationId, now);
+      const detectedName = detectVisitorName(message);
+      const visitorName =
+        conversation.visitorName === "Visitor" && detectedName
+          ? detectedName
+          : conversation.visitorName;
+
+      conversation = {
+        ...conversation,
+        visitorName,
+        status: "Bot typing",
+        lastSeen: "Just now",
+        lastActivityAt: now,
+        autoKnowledgeAuditedAt: "",
+        archived: false,
+        messages: [
+          ...conversation.messages,
+          {
+            id: conversation.messages.length + 1,
+            role: "visitor",
+            text: message
+          }
+        ]
+      };
+
+      const botReply = await getPublicBotReply(channel, conversation, message);
+      conversation = {
+        ...conversation,
+        status: botReply.needsManager ? "Needs manager" : "Bot active",
+        lastSeen: "Just now",
+        lastActivityAt: new Date().toISOString(),
+        messages: [
+          ...conversation.messages,
+          {
+            id: conversation.messages.length + 1,
+            role: "bot",
+            text: botReply.reply
+          }
+        ]
+      };
+
+      channel = upsertChannelConversation(channel, conversation);
+      channels[channelIndex] = channel;
+      upsertWorkspaceChannels(workspaceSlug, channels, new Date().toISOString());
+
+      response.json({
+        workspace: normalizeWorkspaceRecord(workspaceRecord),
+        channel: toPublicChannelPayload(channel, conversationId)
+      });
+    } catch (error) {
+      sendFirebaseError(response, error);
+    }
+  }
+);
+
 app.put("/api/workspaces/:workspaceSlug/channels", async (request, response) => {
   try {
     const firebaseUser = await getOptionalFirebaseUser(request);
@@ -579,6 +676,12 @@ function getWorkspaceStateRecord(workspaceSlug) {
     .get(workspaceSlug);
 }
 
+function getWorkspaceChannels(workspaceSlug) {
+  const state = getWorkspaceStateRecord(workspaceSlug);
+
+  return normalizeChannelsPayload(parseJsonArray(state?.channels_json));
+}
+
 function upsertWorkspaceChannels(workspaceSlug, channels, updatedAt) {
   appDatabase
     .prepare(
@@ -634,6 +737,131 @@ function sanitizeSlug(value) {
   }
 
   return slug;
+}
+
+function sanitizeChannelId(value) {
+  const channelId = String(value || "").trim().toLowerCase();
+
+  if (!/^[a-z0-9-]{1,80}$/.test(channelId)) {
+    throwBadRequest("Channel ID is invalid.");
+  }
+
+  return channelId;
+}
+
+function sanitizeConversationId(value) {
+  const conversationId = String(value || "").trim().toLowerCase();
+
+  if (!/^[a-z0-9-]{1,120}$/.test(conversationId)) {
+    throwBadRequest("Conversation ID is invalid.");
+  }
+
+  return conversationId;
+}
+
+function requirePublicWorkspace(workspaceSlug) {
+  const workspaceRecord = getWorkspaceRecord(workspaceSlug);
+
+  if (!workspaceRecord) {
+    throwNotFound("Workspace not found.");
+  }
+
+  return workspaceRecord;
+}
+
+function requirePublicChannel(workspaceSlug, channelId) {
+  const channel = getWorkspaceChannels(workspaceSlug).find(
+    (item) => item.id === channelId
+  );
+
+  if (!channel) {
+    throwNotFound("Channel not found.");
+  }
+
+  return channel;
+}
+
+function toPublicChannelPayload(channel, conversationId = "") {
+  const conversations = conversationId
+    ? channel.conversations.filter(
+        (conversation) => conversation.id === conversationId
+      )
+    : [];
+
+  return {
+    ...channel,
+    conversations
+  };
+}
+
+function getOrCreatePublicConversation(channel, conversationId, now) {
+  const existingConversation = channel.conversations.find(
+    (conversation) => conversation.id === conversationId
+  );
+
+  if (existingConversation) {
+    return existingConversation;
+  }
+
+  return {
+    id: conversationId,
+    visitorName: "Visitor",
+    status: "Bot active",
+    lastSeen: "Just now",
+    lastActivityAt: now,
+    autoKnowledgeAuditedAt: "",
+    archived: false,
+    messages: [
+      {
+        id: 1,
+        role: "bot",
+        text:
+          "Hi, I am Sale Assist. I can help answer questions here. Before we start, what should I call you?"
+      }
+    ]
+  };
+}
+
+function upsertChannelConversation(channel, conversation) {
+  const existingIndex = channel.conversations.findIndex(
+    (item) => item.id === conversation.id
+  );
+
+  if (existingIndex === -1) {
+    return {
+      ...channel,
+      conversations: [...channel.conversations, conversation]
+    };
+  }
+
+  return {
+    ...channel,
+    conversations: channel.conversations.map((item) =>
+      item.id === conversation.id ? conversation : item
+    )
+  };
+}
+
+async function getPublicBotReply(channel, conversation, message) {
+  try {
+    return await createOllamaReply({
+      message,
+      prompt: channel.prompt,
+      promptUpdatedAt: channel.promptUpdatedAt,
+      autoKnowledgeEnabled: channel.autoKnowledgeEnabled,
+      autoKnowledgePrompt: channel.autoKnowledgePrompt,
+      autoKnowledgeUpdatedAt: channel.autoKnowledgeUpdatedAt,
+      visitorName: conversation.visitorName,
+      history: conversation.messages
+    });
+  } catch (error) {
+    console.error("Public chat bot failed:", error.message);
+    return {
+      reply: MANAGER_HANDOFF_REPLY,
+      needsManager: true,
+      offTopic: false
+    };
+  }
 }
 
 function getWorkspaceSyncToken(request) {
@@ -770,6 +998,12 @@ function toIsoString(value) {
 function throwBadRequest(message) {
   const error = new Error(message);
   error.statusCode = 400;
+  throw error;
+}
+
+function throwNotFound(message) {
+  const error = new Error(message);
+  error.statusCode = 404;
   throw error;
 }
 

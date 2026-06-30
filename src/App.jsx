@@ -135,15 +135,25 @@ const initialChannels = [
 
 function getRoute() {
   const path = normalizePathname(window.location.pathname);
+  const hostWorkspaceSlug = getWorkspaceSlugFromHost();
 
   if (path === "/") {
     return { name: "home" };
   }
 
   if (path.startsWith("/chat/")) {
+    const chatParts = path
+      .replace("/chat/", "")
+      .split("/")
+      .map((part) => decodeURIComponent(part))
+      .filter(Boolean);
+    const workspaceSlug = hostWorkspaceSlug || chatParts[0] || "";
+    const channelId = hostWorkspaceSlug ? chatParts[0] : chatParts[1];
+
     return {
       name: "public-chat",
-      channelId: decodeURIComponent(path.replace("/chat/", ""))
+      workspaceSlug,
+      channelId: channelId || "channel-a"
     };
   }
 
@@ -354,8 +364,8 @@ function getWorkspaceAuthStorageKey(workspaceSlug) {
   return `aotesys-auth-${workspaceSlug || "default"}`;
 }
 
-function getWorkspaceOrigin(workspaceSlug) {
-  return `https://${workspaceSlug}.${APP_DOMAIN}`;
+function getWorkspaceShareLink(workspaceSlug, channelId) {
+  return `https://${APP_DOMAIN}/chat/${workspaceSlug}/${channelId}`;
 }
 
 function slugifyWorkspaceName(value) {
@@ -646,6 +656,60 @@ async function fetchCloudChannels(workspaceSlug, firebaseUser) {
   );
 }
 
+async function fetchPublicChatChannel(workspaceSlug, channelId) {
+  const response = await fetch(
+    `/api/public/workspaces/${encodeURIComponent(
+      workspaceSlug
+    )}/channels/${encodeURIComponent(channelId)}`
+  );
+
+  if (!response.ok) {
+    const error = await getApiError(response, "Public chat channel failed.");
+    throw error;
+  }
+
+  const result = await response.json();
+
+  return {
+    workspace: result.workspace,
+    channel: normalizeChannels([result.channel])[0]
+  };
+}
+
+async function sendPublicChatMessage(
+  workspaceSlug,
+  channelId,
+  conversationId,
+  message
+) {
+  const response = await fetch(
+    `/api/public/workspaces/${encodeURIComponent(
+      workspaceSlug
+    )}/channels/${encodeURIComponent(channelId)}/conversations/${encodeURIComponent(
+      conversationId
+    )}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ message })
+    }
+  );
+
+  if (!response.ok) {
+    const error = await getApiError(response, "Public chat message failed.");
+    throw error;
+  }
+
+  const result = await response.json();
+
+  return {
+    workspace: result.workspace,
+    channel: normalizeChannels([result.channel])[0]
+  };
+}
+
 function mergeWorkspaces(localWorkspaces, cloudWorkspaces) {
   const workspaceMap = new Map();
 
@@ -848,8 +912,12 @@ export default function App() {
   );
 
   const shareLink = activeWorkspace
-    ? `${getWorkspaceOrigin(activeWorkspace.slug)}/chat/${selectedChannelId}`
+    ? getWorkspaceShareLink(activeWorkspace.slug, selectedChannelId)
     : `${window.location.origin}/chat/${selectedChannelId}`;
+  const publicWorkspaceSlug =
+    route.name === "public-chat"
+      ? route.workspaceSlug || getWorkspaceSlugFromHost()
+      : "";
 
   useEffect(() => {
     const handlePopState = () => setRoute(getRoute());
@@ -861,6 +929,51 @@ export default function App() {
   useEffect(() => {
     updateDocumentMetadata(route.name);
   }, [route.name]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const loadPublicChat = async () => {
+      if (route.name !== "public-chat" || !publicWorkspaceSlug || !route.channelId) {
+        return;
+      }
+
+      try {
+        const result = await fetchPublicChatChannel(
+          publicWorkspaceSlug,
+          route.channelId
+        );
+
+        if (isCancelled) {
+          return;
+        }
+
+        setActiveWorkspace(result.workspace);
+        setWorkspaces((current) => mergeWorkspaces(current, [result.workspace]));
+        setChannels((current) => {
+          const withoutChannel = current.filter(
+            (channel) => channel.id !== result.channel.id
+          );
+
+          return [...withoutChannel, result.channel];
+        });
+      } catch {
+        if (!isCancelled) {
+          setActiveWorkspace({
+            name: titleFromSlug(publicWorkspaceSlug),
+            slug: publicWorkspaceSlug,
+            createdAt: getNowIso()
+          });
+        }
+      }
+    };
+
+    void loadPublicChat();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [route.name, route.channelId, publicWorkspaceSlug]);
 
   useEffect(() => {
     void initializeFirebaseAnalytics();
@@ -1437,6 +1550,25 @@ export default function App() {
     const messageText = text.trim();
 
     if (!messageText) {
+      return;
+    }
+
+    if (route.name === "public-chat" && publicWorkspaceSlug) {
+      const result = await sendPublicChatMessage(
+        publicWorkspaceSlug,
+        channelId,
+        conversationId,
+        messageText
+      );
+
+      setActiveWorkspace(result.workspace);
+      setChannels((current) => {
+        const withoutChannel = current.filter(
+          (channel) => channel.id !== result.channel.id
+        );
+
+        return [...withoutChannel, result.channel];
+      });
       return;
     }
 

@@ -41,7 +41,8 @@ deploy:
     - ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
   script:
     - scp -P "$DEPLOY_PORT" aotesys-release.tgz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/aotesys-release.tgz"
-    - ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'sudo /usr/local/sbin/aotesys-deploy /tmp/aotesys-release.tgz'
+    - scp -P "$DEPLOY_PORT" deploy/aotesys-deploy "$DEPLOY_USER@$DEPLOY_HOST:/tmp/aotesys-deploy"
+    - ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'sudo install -m 0755 /tmp/aotesys-deploy /usr/local/sbin/aotesys-deploy && sudo /usr/local/sbin/aotesys-deploy /tmp/aotesys-release.tgz'
   environment:
     name: production
     url: https://aotesys.com

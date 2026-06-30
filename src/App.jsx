@@ -479,7 +479,67 @@ function appendLearnedKnowledge(existingKnowledge, learnedFact) {
   return [cleanExisting, cleanFact].filter(Boolean).join("\n\n");
 }
 
+const OWNER_SETUP_STEPS = [
+  {
+    key: "business-overview",
+    question:
+      "First, what does the business do? One or two plain sentences is enough.",
+    missingPrompt:
+      "Can you add a little more about what the business actually does, who it helps, and what outcome customers want?",
+    followUp: (answer) =>
+      mentionsAny(answer, ["customer", "client", "people", "business", "owner"])
+        ? "Good. What is the most common reason someone contacts you first?"
+        : "Who is the ideal customer for this business?"
+  },
+  {
+    key: "products-services",
+    question:
+      "What are the main products or services customers can ask about?",
+    missingPrompt:
+      "Can you list the main products or services by name, even if it is just a rough list?",
+    followUp: (answer) =>
+      mentionsAny(answer, ["price", "package", "plan", "$", "cost"])
+        ? "Which product or service should I recommend first when a visitor is unsure?"
+        : "Are there prices, packages, options, or availability details I can safely mention?"
+  },
+  {
+    key: "booking-buying",
+    question:
+      "How should a customer buy, book, order, or start with you?",
+    missingPrompt:
+      "What is the next step I should guide a customer toward: call, email, booking link, quote request, checkout, or something else?",
+    followUp: () =>
+      "What details should I collect before handing the customer to you?"
+  },
+  {
+    key: "policies",
+    question:
+      "What policies should I know before answering customers?",
+    missingPrompt:
+      "Please add the most important rules: delivery, refunds, cancellations, service area, opening hours, payment, warranty, or anything customers often misunderstand.",
+    followUp: () =>
+      "Is there anything I should never promise without checking with you first?"
+  },
+  {
+    key: "faq-dump",
+    question:
+      "Do you have any existing FAQ/Q&A, website copy, product notes, or old customer answers to paste in?",
+    missingPrompt:
+      "If you have a Q&A dump, paste it here. If not, tell me the top three questions customers usually ask.",
+    followUp: () =>
+      "Any answer here that has changed recently or conflicts with older information?"
+  }
+];
+
+function mentionsAny(value, terms) {
+  const lowerValue = String(value || "").toLowerCase();
+
+  return terms.some((term) => lowerValue.includes(term));
+}
+
 function buildOwnerSetupConversation(channelId, channelName, now = getNowIso()) {
+  const firstStep = OWNER_SETUP_STEPS[0];
+
   return {
     id: `${channelId}-owner-setup`,
     visitorName: "Receptionist setup",
@@ -490,9 +550,11 @@ function buildOwnerSetupConversation(channelId, channelName, now = getNowIso()) 
     archived: false,
     receptionistLearning: {
       type: "owner-setup",
+      setupStep: 0,
+      followUpCount: 0,
       customerConversationId: "",
       customerName: "Business owner",
-      customerQuestion: "Initial business setup"
+      customerQuestion: firstStep.question
     },
     messages: [
       {
@@ -500,33 +562,115 @@ function buildOwnerSetupConversation(channelId, channelName, now = getNowIso()) 
         role: "bot",
         text: [
           `Let's set up ${channelName} before customers arrive.`,
-          "Tell me what the business does, what products or services you sell, who the ideal customer is, pricing or booking basics, service area, hours, delivery or refund rules, and the top questions customers usually ask.",
-          "You can also paste or dump your existing FAQ/Q&A, website copy, product notes, or old customer answers here. I will treat it as owner-approved source material, turn it into receptionist knowledge, and ask follow-up questions where details are missing."
+          firstStep.question,
+          "You can answer roughly. If you already have FAQ/Q&A or website copy, paste it any time and I will learn from it."
         ].join("\n\n")
       }
     ]
   };
 }
 
-function buildOwnerSetupFollowUp(ownerAnswer, learnedCount) {
-  if (learnedCount <= 1) {
-    return [
-      "Thanks, I have saved that as starter receptionist knowledge.",
-      "Next, you can paste a Q&A dump if you already have one. Otherwise, tell me the main products or services customers ask about, and what I should say about pricing, packages, availability, or booking."
-    ].join("\n\n");
+function getNextOwnerSetupTurn(learningRequest, ownerAnswer) {
+  const setupStep = Number(learningRequest?.setupStep) || 0;
+  const followUpCount = Number(learningRequest?.followUpCount) || 0;
+  const currentStep = OWNER_SETUP_STEPS[setupStep] || OWNER_SETUP_STEPS[0];
+  const answerLooksUseful = isOwnerSetupAnswerUseful(ownerAnswer);
+
+  if (!answerLooksUseful) {
+    return {
+      nextLearning: {
+        ...learningRequest,
+        setupStep,
+        followUpCount: followUpCount + 1,
+        customerQuestion: currentStep.missingPrompt
+      },
+      text: currentStep.missingPrompt,
+      status: "Needs more detail"
+    };
   }
 
-  if (learnedCount === 2) {
-    return [
-      "Good, I have added those details.",
-      "If you have more Q&A, paste it in. What policies should I know before answering customers? For example delivery, refunds, appointment changes, warranty, service area, opening hours, payment methods, or when I should ask for contact details."
-    ].join("\n\n");
+  if (followUpCount === 0 && typeof currentStep.followUp === "function") {
+    const followUpQuestion = currentStep.followUp(ownerAnswer);
+
+    return {
+      nextLearning: {
+        ...learningRequest,
+        setupStep,
+        followUpCount: 1,
+        customerQuestion: followUpQuestion
+      },
+      text: `Good, I saved that.\n\n${followUpQuestion}`,
+      status: "Learning"
+    };
   }
 
-  return [
-    "Got it. I have updated the receptionist knowledge.",
-    "Any more FAQ entries, common customer objections, follow-up questions, or things I should never promise? If something changed from an earlier answer, tell me which version is correct."
-  ].join("\n\n");
+  const nextStep = setupStep + 1;
+  const nextQuestion = OWNER_SETUP_STEPS[nextStep]?.question;
+
+  if (nextQuestion) {
+    return {
+      nextLearning: {
+        ...learningRequest,
+        setupStep: nextStep,
+        followUpCount: 0,
+        customerQuestion: nextQuestion
+      },
+      text: `Great, I have enough for that part.\n\n${nextQuestion}`,
+      status: "Learning"
+    };
+  }
+
+  return {
+    nextLearning: {
+      ...learningRequest,
+      setupStep,
+      followUpCount,
+      setupComplete: true,
+      customerQuestion: "Setup complete"
+    },
+    text:
+      "Great, I have enough starter knowledge to act more like your receptionist. You can still paste more FAQ, product notes, or corrections here any time.",
+    status: "Setup complete"
+  };
+}
+
+function getOwnerSetupLearningState(conversation) {
+  const learning = conversation?.receptionistLearning || {};
+
+  if (Number.isFinite(Number(learning.setupStep))) {
+    return learning;
+  }
+
+  const ownerAnswerCount = (conversation?.messages || []).filter(
+    (message) => message.role === "owner"
+  ).length;
+  const setupStep = Math.min(
+    Math.max(0, ownerAnswerCount),
+    OWNER_SETUP_STEPS.length - 1
+  );
+  const step = OWNER_SETUP_STEPS[setupStep] || OWNER_SETUP_STEPS[0];
+
+  return {
+    ...learning,
+    type: "owner-setup",
+    setupStep,
+    followUpCount: 0,
+    customerQuestion: step.question
+  };
+}
+
+function isOwnerSetupAnswerUseful(ownerAnswer) {
+  const answer = String(ownerAnswer || "").trim();
+
+  if (answer.length >= 80) {
+    return true;
+  }
+
+  if (/\n|q\s*:|question\s*:|answer\s*:|faq/i.test(answer)) {
+    return answer.length >= 35;
+  }
+
+  return answer.split(/\s+/).filter(Boolean).length >= 12;
 }
 
 function detectVisitorName(text) {
@@ -1510,10 +1654,10 @@ export default function App() {
             channel.autoKnowledgePrompt,
             learnedFact
           );
-          const learnedCount =
-            selectedConversation.messages.filter(
-              (message) => message.role === "owner"
-            ).length + 1;
+          const setupTurn = getNextOwnerSetupTurn(
+            getOwnerSetupLearningState(selectedConversation),
+            ownerAnswer
+          );
 
           return {
             ...channel,
@@ -1525,11 +1669,12 @@ export default function App() {
               conversation.id === selectedConversation.id
                 ? {
                     ...conversation,
-                    status: "Learning",
+                    status: setupTurn.status,
                     lastSeen: "Just now",
                     lastActivityAt: now,
                     autoKnowledgeAuditedAt: now,
                     archived: false,
+                    receptionistLearning: setupTurn.nextLearning,
                     messages: [
                       ...conversation.messages,
                       {
@@ -1540,7 +1685,7 @@ export default function App() {
                       {
                         id: conversation.messages.length + 2,
                         role: "bot",
-                        text: buildOwnerSetupFollowUp(ownerAnswer, learnedCount)
+                        text: setupTurn.text
                       }
                     ]
                   }

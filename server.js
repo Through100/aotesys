@@ -155,12 +155,15 @@ app.get(
     try {
       const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
       const channelId = sanitizeChannelId(request.params.channelId);
+      const conversationId = request.query.conversationId
+        ? sanitizeConversationId(request.query.conversationId)
+        : "";
       const workspaceRecord = requirePublicWorkspace(workspaceSlug);
       const channel = requirePublicChannel(workspaceSlug, channelId);
 
       response.json({
         workspace: normalizeWorkspaceRecord(workspaceRecord),
-        channel: toPublicChannelPayload(channel)
+        channel: toPublicChannelPayload(channel, conversationId)
       });
     } catch (error) {
       sendFirebaseError(response, error);
@@ -217,9 +220,20 @@ app.post(
       };
 
       const botReply = await getPublicBotReply(channel, conversation, message);
+      const botMessageText =
+        botReply.needsManager && channel.receptionistLearningEnabled
+          ? "Thanks, let me check that properly with the business owner so I can give you the right answer."
+          : botReply.reply;
+      const conversationStatus =
+        botReply.needsManager && channel.receptionistLearningEnabled
+          ? "Receptionist checking"
+          : botReply.needsManager
+            ? "Needs manager"
+            : "Bot active";
+
       conversation = {
         ...conversation,
-        status: botReply.needsManager ? "Needs manager" : "Bot active",
+        status: conversationStatus,
         lastSeen: "Just now",
         lastActivityAt: new Date().toISOString(),
         messages: [
@@ -227,10 +241,22 @@ app.post(
           {
             id: conversation.messages.length + 1,
             role: "bot",
-            text: botReply.reply
+            text: botMessageText
           }
         ]
       };
+
+      if (botReply.needsManager && channel.receptionistLearningEnabled) {
+        channel = upsertChannelConversation(
+          channel,
+          createReceptionistLearningConversation({
+            channel,
+            customerConversation: conversation,
+            customerMessage: message,
+            now
+          })
+        );
+      }
 
       channel = upsertChannelConversation(channel, conversation);
       channels[channelIndex] = channel;
@@ -888,6 +914,56 @@ function upsertChannelConversation(channel, conversation) {
   };
 }
 
+function createReceptionistLearningConversation({
+  channel,
+  customerConversation,
+  customerMessage,
+  now
+}) {
+  const id = `learn-${customerConversation.id}`;
+  const existingConversation = channel.conversations.find(
+    (conversation) => conversation.id === id
+  );
+  const existingMessages = existingConversation?.messages || [];
+  const customerName = customerConversation.visitorName || "the visitor";
+  const existingKnowledge = String(channel.autoKnowledgePrompt || "").trim();
+  const possibleConflict = existingKnowledge
+    ? "\n\nIf this differs from existing learned knowledge, please say what changed and which answer should be used going forward."
+    : "";
+
+  return {
+    id,
+    visitorName: "Receptionist learning",
+    status: "Owner input needed",
+    lastSeen: "Just now",
+    lastActivityAt: now,
+    autoKnowledgeAuditedAt: "",
+    archived: false,
+    receptionistLearning: {
+      customerConversationId: customerConversation.id,
+      customerName,
+      customerQuestion: customerMessage
+    },
+    messages:
+      existingMessages.length > 0
+        ? existingMessages
+        : [
+            {
+              id: 1,
+              role: "bot",
+              text: [
+                `Customer question from ${customerName}: "${customerMessage}"`,
+                "I do not have an approved answer yet. What should I tell the customer?",
+                "Helpful details to include: exact answer, any limits or conditions, whether this answer should be reused for future customers, and one or two related follow-up details customers often ask.",
+                possibleConflict.trim()
+              ]
+                .filter(Boolean)
+                .join("\n\n")
+            }
+          ]
+  };
+}
+
 async function getPublicBotReply(channel, conversation, message) {
   try {
     return await createOllamaReply({
@@ -1002,6 +1078,7 @@ function normalizeChannelsPayload(channels) {
     autoKnowledgePrompt: String(channel?.autoKnowledgePrompt || ""),
     autoKnowledgeUpdatedAt: String(channel?.autoKnowledgeUpdatedAt || ""),
     autoKnowledgeLastRunAt: String(channel?.autoKnowledgeLastRunAt || ""),
+    receptionistLearningEnabled: Boolean(channel?.receptionistLearningEnabled),
     conversations: Array.isArray(channel?.conversations)
       ? channel.conversations.map(normalizeConversationPayload)
       : []
@@ -1017,6 +1094,7 @@ function normalizeConversationPayload(conversation) {
     lastActivityAt: String(conversation?.lastActivityAt || ""),
     autoKnowledgeAuditedAt: String(conversation?.autoKnowledgeAuditedAt || ""),
     archived: Boolean(conversation?.archived),
+    receptionistLearning: conversation?.receptionistLearning || null,
     messages: Array.isArray(conversation?.messages)
       ? conversation.messages.map((message) => ({
           id: Number(message?.id) || 1,

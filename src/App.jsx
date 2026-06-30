@@ -80,6 +80,7 @@ const initialChannels = [
     prompt:
       "You are Sale Assist. Greet visitors warmly, ask for their name, answer product questions clearly, and hand over to the business owner when needed.",
     autoKnowledgeEnabled: false,
+    receptionistLearningEnabled: false,
     autoKnowledgePrompt: "",
     autoKnowledgeUpdatedAt: "",
     autoKnowledgeLastRunAt: "",
@@ -253,12 +254,14 @@ function normalizeChannels(channels) {
     ...channel,
     promptUpdatedAt: channel.promptUpdatedAt || getTodayDate(),
     autoKnowledgeEnabled: Boolean(channel.autoKnowledgeEnabled),
+    receptionistLearningEnabled: Boolean(channel.receptionistLearningEnabled),
     autoKnowledgePrompt: channel.autoKnowledgePrompt || "",
     autoKnowledgeUpdatedAt: channel.autoKnowledgeUpdatedAt || "",
     autoKnowledgeLastRunAt: channel.autoKnowledgeLastRunAt || "",
     conversations: (channel.conversations || []).map((conversation) => ({
       ...conversation,
       archived: Boolean(conversation.archived),
+      receptionistLearning: conversation.receptionistLearning || null,
       autoKnowledgeAuditedAt: conversation.autoKnowledgeAuditedAt || "",
       lastActivityAt:
         conversation.lastActivityAt ||
@@ -480,6 +483,25 @@ function getVisitorSessionId(workspaceSlug, channelId) {
   return nextId;
 }
 
+function buildReceptionistCustomerReply(ownerAnswer) {
+  return `Thanks for waiting. I checked that for you: ${ownerAnswer.trim()}`;
+}
+
+function buildReceptionistLearnedFact(customerQuestion, ownerAnswer) {
+  return `Customer asked: ${customerQuestion.trim()}\nOwner confirmed: ${ownerAnswer.trim()}`;
+}
+
+function appendLearnedKnowledge(existingKnowledge, learnedFact) {
+  const cleanExisting = String(existingKnowledge || "").trim();
+  const cleanFact = String(learnedFact || "").trim();
+
+  if (!cleanFact || cleanExisting.includes(cleanFact)) {
+    return cleanExisting;
+  }
+
+  return [cleanExisting, cleanFact].filter(Boolean).join("\n\n");
+}
+
 function detectVisitorName(text) {
   const trimmedText = text.trim();
   const lowerText = trimmedText.toLowerCase();
@@ -656,11 +678,14 @@ async function fetchCloudChannels(workspaceSlug, firebaseUser) {
   );
 }
 
-async function fetchPublicChatChannel(workspaceSlug, channelId) {
+async function fetchPublicChatChannel(workspaceSlug, channelId, conversationId = "") {
+  const query = conversationId
+    ? `?conversationId=${encodeURIComponent(conversationId)}`
+    : "";
   const response = await fetch(
     `/api/public/workspaces/${encodeURIComponent(
       workspaceSlug
-    )}/channels/${encodeURIComponent(channelId)}`
+    )}/channels/${encodeURIComponent(channelId)}${query}`
   );
 
   if (!response.ok) {
@@ -1228,6 +1253,7 @@ export default function App() {
       prompt:
         "Introduce yourself, collect the visitor name, answer sales questions, and alert the owner if the visitor is ready to buy.",
       autoKnowledgeEnabled: false,
+      receptionistLearningEnabled: false,
       autoKnowledgePrompt: "",
       autoKnowledgeUpdatedAt: "",
       autoKnowledgeLastRunAt: "",
@@ -1281,6 +1307,16 @@ export default function App() {
       current.map((channel) =>
         channel.id === selectedChannelId
           ? { ...channel, autoKnowledgeEnabled }
+          : channel
+      )
+    );
+  };
+
+  const updateReceptionistLearningEnabled = (receptionistLearningEnabled) => {
+    setChannels((current) =>
+      current.map((channel) =>
+        channel.id === selectedChannelId
+          ? { ...channel, receptionistLearningEnabled }
           : channel
       )
     );
@@ -1389,10 +1425,79 @@ export default function App() {
       return;
     }
 
+    const ownerAnswer = draftReply.trim();
+    const learningRequest = selectedConversation.receptionistLearning;
+
     setChannels((current) =>
       current.map((channel) => {
         if (channel.id !== selectedChannelId) {
           return channel;
+        }
+
+        if (learningRequest?.customerConversationId) {
+          const now = getNowIso();
+          const customerReply = buildReceptionistCustomerReply(ownerAnswer);
+          const learnedFact = buildReceptionistLearnedFact(
+            learningRequest.customerQuestion,
+            ownerAnswer
+          );
+          const nextKnowledge = appendLearnedKnowledge(
+            channel.autoKnowledgePrompt,
+            learnedFact
+          );
+
+          return {
+            ...channel,
+            autoKnowledgeEnabled: true,
+            autoKnowledgePrompt: nextKnowledge,
+            autoKnowledgeUpdatedAt: now,
+            conversations: channel.conversations.map((conversation) => {
+              if (conversation.id === selectedConversation.id) {
+                return {
+                  ...conversation,
+                  status: "Learned",
+                  lastSeen: "Just now",
+                  lastActivityAt: now,
+                  autoKnowledgeAuditedAt: now,
+                  archived: false,
+                  messages: [
+                    ...conversation.messages,
+                    {
+                      id: conversation.messages.length + 1,
+                      role: "owner",
+                      text: ownerAnswer
+                    },
+                    {
+                      id: conversation.messages.length + 2,
+                      role: "bot",
+                      text:
+                        "Got it. I learned this and prepared a customer-friendly reply."
+                    }
+                  ]
+                };
+              }
+
+              if (conversation.id === learningRequest.customerConversationId) {
+                return {
+                  ...conversation,
+                  status: "Bot active",
+                  lastSeen: "Just now",
+                  lastActivityAt: now,
+                  autoKnowledgeAuditedAt: "",
+                  messages: [
+                    ...conversation.messages,
+                    {
+                      id: conversation.messages.length + 1,
+                      role: "bot",
+                      text: customerReply
+                    }
+                  ]
+                };
+              }
+
+              return conversation;
+            })
+          };
         }
 
         return {
@@ -1414,7 +1519,7 @@ export default function App() {
                 {
                   id: conversation.messages.length + 1,
                   role: "owner",
-                  text: draftReply.trim()
+                  text: ownerAnswer
                 }
               ]
             };
@@ -1654,6 +1759,27 @@ export default function App() {
     }
   };
 
+  const refreshPublicConversation = async (channelId, conversationId) => {
+    if (route.name !== "public-chat" || !publicWorkspaceSlug) {
+      return;
+    }
+
+    const result = await fetchPublicChatChannel(
+      publicWorkspaceSlug,
+      channelId,
+      conversationId
+    );
+
+    setActiveWorkspace(result.workspace);
+    setChannels((current) => {
+      const withoutChannel = current.filter(
+        (channel) => channel.id !== result.channel.id
+      );
+
+      return [...withoutChannel, result.channel];
+    });
+  };
+
   if (route.name === "public-chat") {
     const publicChannel = channels.find(
       (channel) => channel.id === route.channelId
@@ -1663,10 +1789,12 @@ export default function App() {
       <PublicChatPage
         channel={publicChannel}
         channelId={route.channelId}
+        workspaceSlug={publicWorkspaceSlug}
         workspace={activeWorkspace}
         onNavigate={navigate}
         onEnsureConversation={ensureVisitorConversation}
         onSendVisitorMessage={sendVisitorMessage}
+        onRefreshConversation={refreshPublicConversation}
       />
     );
   }
@@ -1821,6 +1949,9 @@ export default function App() {
             onPromptChange={updatePrompt}
             onPromptUpdatedAtChange={updatePromptUpdatedAt}
             onAutoKnowledgeEnabledChange={updateAutoKnowledgeEnabled}
+            onReceptionistLearningEnabledChange={
+              updateReceptionistLearningEnabled
+            }
             onAutoKnowledgePromptChange={updateAutoKnowledgePrompt}
             onUpdateAutoKnowledge={auditAutoKnowledge}
             onDraftReplyChange={setDraftReply}
@@ -2963,10 +3094,12 @@ function LoginPage({ isAuthReady, onNavigate, onLogin }) {
 function PublicChatPage({
   channel,
   channelId,
+  workspaceSlug,
   workspace,
   onNavigate,
   onEnsureConversation,
-  onSendVisitorMessage
+  onSendVisitorMessage,
+  onRefreshConversation
 }) {
   const [visitorConversationId] = useState(() =>
     getVisitorSessionId(workspace?.slug, channelId)
@@ -2979,6 +3112,24 @@ function PublicChatPage({
       onEnsureConversation(channelId, visitorConversationId);
     }
   }, [channel, channelId, visitorConversationId]);
+
+  useEffect(() => {
+    if (!workspaceSlug || !channel) {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => {
+      void onRefreshConversation(channelId, visitorConversationId).catch(() => {});
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [
+    channel,
+    channelId,
+    onRefreshConversation,
+    visitorConversationId,
+    workspaceSlug
+  ]);
 
   const conversation = channel?.conversations.find(
     (item) => item.id === visitorConversationId
@@ -2995,6 +3146,7 @@ function PublicChatPage({
 
     try {
       await onSendVisitorMessage(channelId, visitorConversationId, message);
+      await onRefreshConversation(channelId, visitorConversationId).catch(() => {});
     } finally {
       setIsSending(false);
     }
@@ -3131,6 +3283,7 @@ function ConversationPanel({
   onPromptChange,
   onPromptUpdatedAtChange,
   onAutoKnowledgeEnabledChange,
+  onReceptionistLearningEnabledChange,
   onAutoKnowledgePromptChange,
   onUpdateAutoKnowledge,
   onDraftReplyChange,
@@ -3240,6 +3393,18 @@ function ConversationPanel({
                     <span>Enabled</span>
                   </label>
                 </div>
+                <label className="checkbox-row receptionist-toggle">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(
+                      selectedChannel?.receptionistLearningEnabled
+                    )}
+                    onChange={(event) =>
+                      onReceptionistLearningEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>Learn as a real receptionist</span>
+                </label>
                 <textarea
                   value={selectedChannel?.autoKnowledgePrompt ?? ""}
                   onChange={(event) =>
@@ -3308,9 +3473,13 @@ function ConversationPanel({
               <button
                 key={conversation.id}
                 className={
-                  conversation.id === selectedConversation?.id
-                    ? "visitor-button active"
-                    : "visitor-button"
+                  [
+                    "visitor-button",
+                    conversation.id === selectedConversation?.id ? "active" : "",
+                    conversation.receptionistLearning ? "learning-thread" : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
                 }
                 onClick={() => onConversationChange(conversation.id)}
               >
@@ -3329,6 +3498,12 @@ function ConversationPanel({
             <div>
               <p className="eyebrow">{selectedChannel?.name}</p>
               <h2>{selectedConversation?.visitorName || "No active visitor"}</h2>
+              {selectedConversation?.receptionistLearning && (
+                <p className="learning-note">
+                  Internal learning thread. Your answer will teach the bot and
+                  create a warmer customer reply.
+                </p>
+              )}
             </div>
             <div className="chat-actions">
               <span className="status-pill">
@@ -3361,7 +3536,11 @@ function ConversationPanel({
           <div className="reply-box">
             <input
               value={draftReply}
-              placeholder="Join the conversation..."
+              placeholder={
+                selectedConversation?.receptionistLearning
+                  ? "Answer the receptionist..."
+                  : "Join the conversation..."
+              }
               onChange={(event) => onDraftReplyChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {

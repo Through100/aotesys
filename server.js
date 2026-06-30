@@ -80,6 +80,10 @@ app.post("/api/workspaces", async (request, response) => {
     const syncTokenHash = hashWorkspaceSyncToken(syncToken);
     const now = new Date().toISOString();
 
+    if (request.body?.intent === "create" && workspaceRecord) {
+      throwWorkspaceUnavailable();
+    }
+
     assertWorkspaceOwner(workspaceRecord, firebaseUser.uid);
 
     appDatabase
@@ -689,10 +693,15 @@ function assertWorkspaceOwner(workspaceRecord, ownerUid) {
   const savedOwnerUid = workspaceRecord?.owner_uid;
 
   if (workspaceRecord && savedOwnerUid && savedOwnerUid !== ownerUid) {
-    const error = new Error("Workspace belongs to another Google account.");
-    error.statusCode = 403;
-    throw error;
+    throwWorkspaceUnavailable();
   }
+}
+
+function throwWorkspaceUnavailable() {
+  const error = new Error("The workspace name is unavailable.");
+  error.statusCode = 409;
+  error.code = "workspace-unavailable";
+  throw error;
 }
 
 function assertWorkspaceTokenMatch(workspaceRecord, syncTokenHash) {
@@ -766,6 +775,7 @@ function throwBadRequest(message) {
 
 function sendFirebaseError(response, error) {
   response.status(error.statusCode || 500).json({
+    code: error.code || "firebase-request-failed",
     error: error.message || "Firebase request failed."
   });
 }

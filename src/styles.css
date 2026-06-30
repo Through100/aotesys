@@ -674,6 +674,12 @@ button {
   background: #ffffff;
 }
 
+.auth-form input.input-error {
+  border-color: #c1543f;
+  background: #fff7f5;
+  box-shadow: 0 0 0 3px rgba(193, 84, 63, 0.12);
+}
+
 .workspace-preview {
   display: inline-flex;
   align-items: center;
@@ -685,6 +691,12 @@ button {
   color: #31534e;
   background: #f7faf7;
   font-weight: 800;
+}
+
+.workspace-preview.preview-error {
+  border-color: #d76a54;
+  color: #a83e2d;
+  background: #fff7f5;
 }
 
 .workspace-preview span {

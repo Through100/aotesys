@@ -565,6 +565,21 @@ async function fetchCloudWorkspaces(firebaseUser) {
 }
 
 async function saveCloudWorkspace(workspace, channels, firebaseUser) {
+  return saveCloudWorkspaceWithOptions(workspace, channels, firebaseUser);
+}
+
+async function createCloudWorkspace(workspace, channels, firebaseUser) {
+  return saveCloudWorkspaceWithOptions(workspace, channels, firebaseUser, {
+    intent: "create"
+  });
+}
+
+async function saveCloudWorkspaceWithOptions(
+  workspace,
+  channels,
+  firebaseUser,
+  options = {}
+) {
   const syncToken = ensureWorkspaceSyncToken(workspace.slug);
   const authHeaders = await getFirebaseUserHeaders(firebaseUser);
   const response = await fetch("/api/workspaces", {
@@ -576,12 +591,29 @@ async function saveCloudWorkspace(workspace, channels, firebaseUser) {
     body: JSON.stringify({
       workspace,
       channels,
-      syncToken
+      syncToken,
+      intent: options.intent || "sync"
     })
   });
 
   if (!response.ok) {
-    throw new Error("Firebase workspace save failed.");
+    const error = await getApiError(response, "Workspace could not be saved.");
+    throw error;
+  }
+}
+
+async function getApiError(response, fallbackMessage) {
+  try {
+    const result = await response.json();
+    const error = new Error(result.error || fallbackMessage);
+    error.statusCode = response.status;
+    error.code = result.code || "";
+    return error;
+  } catch {
+    const error = new Error(fallbackMessage);
+    error.statusCode = response.status;
+    error.code = "";
+    return error;
   }
 }
 
@@ -991,7 +1023,7 @@ export default function App() {
     };
     const workspaceChannels = normalizeChannels(initialChannels);
 
-    await saveCloudWorkspace(workspace, workspaceChannels, user);
+    await createCloudWorkspace(workspace, workspaceChannels, user);
 
     setWorkspaces((current) => {
       const withoutDuplicate = current.filter((item) => item.slug !== slug);
@@ -2549,6 +2581,7 @@ function SignupPage({ isAuthReady, onNavigate, onCreateWorkspace }) {
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const previewSlug = slugifyWorkspaceName(workspaceName) || "your-business";
+  const isWorkspaceUnavailable = message === "The workspace name is unavailable.";
 
   const submit = async (event) => {
     event.preventDefault();
@@ -2602,10 +2635,19 @@ function SignupPage({ isAuthReady, onNavigate, onCreateWorkspace }) {
             <input
               value={workspaceName}
               placeholder="Online2Book"
-              onChange={(event) => setWorkspaceName(event.target.value)}
+              className={isWorkspaceUnavailable ? "input-error" : ""}
+              aria-invalid={isWorkspaceUnavailable}
+              onChange={(event) => {
+                setWorkspaceName(event.target.value);
+                setMessage("");
+              }}
             />
           </label>
-          <div className="workspace-preview">
+          <div
+            className={`workspace-preview ${
+              isWorkspaceUnavailable ? "preview-error" : ""
+            }`}
+          >
             <Building2 size={18} />
             <span>{previewSlug}.{APP_DOMAIN}</span>
           </div>
@@ -2634,6 +2676,7 @@ function WorkspaceOnboardingPage({
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const previewSlug = slugifyWorkspaceName(workspaceName) || "your-business";
+  const isWorkspaceUnavailable = message === "The workspace name is unavailable.";
 
   const submit = async (event) => {
     event.preventDefault();
@@ -2683,11 +2726,20 @@ function WorkspaceOnboardingPage({
             <input
               value={workspaceName}
               placeholder="Online2Book"
-              onChange={(event) => setWorkspaceName(event.target.value)}
+              className={isWorkspaceUnavailable ? "input-error" : ""}
+              aria-invalid={isWorkspaceUnavailable}
+              onChange={(event) => {
+                setWorkspaceName(event.target.value);
+                setMessage("");
+              }}
               autoFocus
             />
           </label>
-          <div className="workspace-preview">
+          <div
+            className={`workspace-preview ${
+              isWorkspaceUnavailable ? "preview-error" : ""
+            }`}
+          >
             <Building2 size={18} />
             <span>{previewSlug}.{APP_DOMAIN}</span>
           </div>

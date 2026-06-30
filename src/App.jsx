@@ -80,56 +80,12 @@ const initialChannels = [
     prompt:
       "You are Sale Assist. Greet visitors warmly, ask for their name, answer product questions clearly, and hand over to the business owner when needed.",
     autoKnowledgeEnabled: false,
-    receptionistLearningEnabled: false,
+    receptionistLearningEnabled: true,
     autoKnowledgePrompt: "",
     autoKnowledgeUpdatedAt: "",
     autoKnowledgeLastRunAt: "",
     conversations: [
-      {
-        id: "maria-lee",
-        visitorName: "Maria Lee",
-        status: "Bot active",
-        lastSeen: "2 min ago",
-        lastActivityAt: new Date(Date.now() - 120_000).toISOString(),
-        autoKnowledgeAuditedAt: "",
-        archived: false,
-        messages: [
-          {
-            id: 1,
-            role: "bot",
-            text:
-              "Hi, I am Sale Assist. I can help with product questions and connect you with the owner. What is your name?"
-          },
-          {
-            id: 2,
-            role: "visitor",
-            text: "I am Maria. Do you help compare service packages?"
-          },
-          {
-            id: 3,
-            role: "bot",
-            text:
-              "Nice to meet you, Maria. Yes, tell me what you need most and I can narrow the best option."
-          }
-        ]
-      },
-      {
-        id: "new-visitor",
-        visitorName: "New visitor",
-        status: "Waiting",
-        lastSeen: "Just now",
-        lastActivityAt: new Date().toISOString(),
-        autoKnowledgeAuditedAt: "",
-        archived: false,
-        messages: [
-          {
-            id: 1,
-            role: "bot",
-            text:
-              "Hi, I am Sale Assist. I can answer questions here. Before we start, what should I call you?"
-          }
-        ]
-      }
+      buildOwnerSetupConversation("channel-a", "Channel A", new Date().toISOString())
     ]
   }
 ];
@@ -268,6 +224,27 @@ function normalizeChannels(channels) {
         deriveLastActivityAt(conversation.lastSeen)
     }))
   }));
+}
+
+function ensureOwnerSetupChannels(channels) {
+  return normalizeChannels(channels).map((channel) => {
+    const hasSetupConversation = channel.conversations.some(
+      (conversation) => conversation.receptionistLearning?.type === "owner-setup"
+    );
+
+    if (hasSetupConversation) {
+      return channel;
+    }
+
+    return {
+      ...channel,
+      receptionistLearningEnabled: true,
+      conversations: [
+        buildOwnerSetupConversation(channel.id, channel.name),
+        ...channel.conversations
+      ]
+    };
+  });
 }
 
 function deriveLastActivityAt(lastSeen) {
@@ -500,6 +477,56 @@ function appendLearnedKnowledge(existingKnowledge, learnedFact) {
   }
 
   return [cleanExisting, cleanFact].filter(Boolean).join("\n\n");
+}
+
+function buildOwnerSetupConversation(channelId, channelName, now = getNowIso()) {
+  return {
+    id: `${channelId}-owner-setup`,
+    visitorName: "Receptionist setup",
+    status: "Owner input needed",
+    lastSeen: "Start here",
+    lastActivityAt: now,
+    autoKnowledgeAuditedAt: "",
+    archived: false,
+    receptionistLearning: {
+      type: "owner-setup",
+      customerConversationId: "",
+      customerName: "Business owner",
+      customerQuestion: "Initial business setup"
+    },
+    messages: [
+      {
+        id: 1,
+        role: "bot",
+        text: [
+          `Let's set up ${channelName} before customers arrive.`,
+          "Tell me what the business does, what products or services you sell, who the ideal customer is, pricing or booking basics, service area, hours, delivery or refund rules, and the top questions customers usually ask.",
+          "A rough answer is fine. I will turn it into receptionist knowledge and ask follow-up questions where details are missing."
+        ].join("\n\n")
+      }
+    ]
+  };
+}
+
+function buildOwnerSetupFollowUp(ownerAnswer, learnedCount) {
+  if (learnedCount <= 1) {
+    return [
+      "Thanks, I have saved that as starter receptionist knowledge.",
+      "Next, what are the main products or services customers ask about, and what should I say about pricing, packages, availability, or booking?"
+    ].join("\n\n");
+  }
+
+  if (learnedCount === 2) {
+    return [
+      "Good, I have added those details.",
+      "What policies should I know before answering customers? For example delivery, refunds, appointment changes, warranty, service area, opening hours, payment methods, or when I should ask for contact details."
+    ].join("\n\n");
+  }
+
+  return [
+    "Got it. I have updated the receptionist knowledge.",
+    "Any common customer objections, follow-up questions, or things I should never promise? If something changed from an earlier answer, tell me which version is correct."
+  ].join("\n\n");
 }
 
 function detectVisitorName(text) {
@@ -1067,7 +1094,7 @@ export default function App() {
           );
 
           if (!isCancelled && cloudChannels.length > 0) {
-            setChannels(cloudChannels);
+            setChannels(ensureOwnerSetupChannels(cloudChannels));
           }
 
           if (!isCancelled) {
@@ -1132,14 +1159,18 @@ export default function App() {
   };
 
   const selectWorkspace = (workspace, nextChannels) => {
+    const workspaceChannels = ensureOwnerSetupChannels(
+      nextChannels || getInitialChannels(workspace.slug)
+    );
+
     setActiveWorkspace(workspace);
     setProfile((current) => ({
       ...current,
       businessName: workspace.name
     }));
-    setChannels(nextChannels || getInitialChannels(workspace.slug));
+    setChannels(workspaceChannels);
     setSelectedChannelId("channel-a");
-    setSelectedConversationId("maria-lee");
+    setSelectedConversationId(workspaceChannels[0]?.conversations[0]?.id || "");
     window.localStorage.setItem(CURRENT_WORKSPACE_STORAGE_KEY, workspace.slug);
   };
 
@@ -1253,29 +1284,11 @@ export default function App() {
       prompt:
         "Introduce yourself, collect the visitor name, answer sales questions, and alert the owner if the visitor is ready to buy.",
       autoKnowledgeEnabled: false,
-      receptionistLearningEnabled: false,
+      receptionistLearningEnabled: true,
       autoKnowledgePrompt: "",
       autoKnowledgeUpdatedAt: "",
       autoKnowledgeLastRunAt: "",
-      conversations: [
-        {
-          id: `${id}-visitor`,
-          visitorName: "New visitor",
-          status: "Bot active",
-          lastSeen: "New",
-          lastActivityAt: getNowIso(),
-          autoKnowledgeAuditedAt: "",
-          archived: false,
-          messages: [
-            {
-              id: 1,
-              role: "bot",
-              text:
-                "Hi, I am Sale Assist. I can help answer your questions. What is your name?"
-            }
-          ]
-        }
-      ]
+      conversations: [buildOwnerSetupConversation(id, `Channel ${String.fromCharCode(64 + channelNumber)}`)]
     };
 
     setChannels((current) => [...current, nextChannel]);
@@ -1432,6 +1445,52 @@ export default function App() {
       current.map((channel) => {
         if (channel.id !== selectedChannelId) {
           return channel;
+        }
+
+        if (learningRequest?.type === "owner-setup") {
+          const now = getNowIso();
+          const learnedFact = `Owner setup answer: ${ownerAnswer}`;
+          const nextKnowledge = appendLearnedKnowledge(
+            channel.autoKnowledgePrompt,
+            learnedFact
+          );
+          const learnedCount =
+            selectedConversation.messages.filter(
+              (message) => message.role === "owner"
+            ).length + 1;
+
+          return {
+            ...channel,
+            autoKnowledgeEnabled: true,
+            receptionistLearningEnabled: true,
+            autoKnowledgePrompt: nextKnowledge,
+            autoKnowledgeUpdatedAt: now,
+            conversations: channel.conversations.map((conversation) =>
+              conversation.id === selectedConversation.id
+                ? {
+                    ...conversation,
+                    status: "Learning",
+                    lastSeen: "Just now",
+                    lastActivityAt: now,
+                    autoKnowledgeAuditedAt: now,
+                    archived: false,
+                    messages: [
+                      ...conversation.messages,
+                      {
+                        id: conversation.messages.length + 1,
+                        role: "owner",
+                        text: ownerAnswer
+                      },
+                      {
+                        id: conversation.messages.length + 2,
+                        role: "bot",
+                        text: buildOwnerSetupFollowUp(ownerAnswer, learnedCount)
+                      }
+                    ]
+                  }
+                : conversation
+            )
+          };
         }
 
         if (learningRequest?.customerConversationId) {

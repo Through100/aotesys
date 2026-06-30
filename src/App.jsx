@@ -44,7 +44,12 @@ import {
   getStructuredData,
   normalizePathname
 } from "./seoContent.js";
-import { initializeFirebaseAnalytics } from "./firebaseClient.js";
+import {
+  initializeFirebaseAnalytics,
+  signInWithGoogle,
+  signOutFromFirebase,
+  subscribeToFirebaseAuth
+} from "./firebaseClient.js";
 
 const APP_NAME = "Aotesys";
 const APP_DOMAIN = "aotesys.com";
@@ -533,8 +538,22 @@ async function fetchFirebaseStatus() {
   return response.json();
 }
 
-async function fetchCloudWorkspaces() {
-  const response = await fetch("/api/workspaces");
+async function getFirebaseUserHeaders(firebaseUser) {
+  if (!firebaseUser) {
+    return {};
+  }
+
+  const idToken = await firebaseUser.getIdToken();
+
+  return {
+    Authorization: `Bearer ${idToken}`
+  };
+}
+
+async function fetchCloudWorkspaces(firebaseUser) {
+  const response = await fetch("/api/workspaces", {
+    headers: await getFirebaseUserHeaders(firebaseUser)
+  });
 
   if (!response.ok) {
     throw new Error("Firebase workspaces request failed.");
@@ -545,12 +564,14 @@ async function fetchCloudWorkspaces() {
   return Array.isArray(result.workspaces) ? result.workspaces : [];
 }
 
-async function saveCloudWorkspace(workspace, channels) {
+async function saveCloudWorkspace(workspace, channels, firebaseUser) {
   const syncToken = ensureWorkspaceSyncToken(workspace.slug);
+  const authHeaders = await getFirebaseUserHeaders(firebaseUser);
   const response = await fetch("/api/workspaces", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...authHeaders
     },
     body: JSON.stringify({
       workspace,
@@ -564,10 +585,11 @@ async function saveCloudWorkspace(workspace, channels) {
   }
 }
 
-async function fetchCloudChannels(workspaceSlug) {
+async function fetchCloudChannels(workspaceSlug, firebaseUser) {
   const syncToken = getStoredWorkspaceSyncToken(workspaceSlug);
+  const authHeaders = await getFirebaseUserHeaders(firebaseUser);
 
-  if (!syncToken) {
+  if (!syncToken && !firebaseUser) {
     return [];
   }
 
@@ -575,6 +597,7 @@ async function fetchCloudChannels(workspaceSlug) {
     `/api/workspaces/${encodeURIComponent(workspaceSlug)}/channels`,
     {
       headers: {
+        ...authHeaders,
         "x-aotesys-workspace-token": syncToken
       }
     }
@@ -744,6 +767,8 @@ export default function App() {
       workspace &&
         (window.localStorage.getItem(getWorkspaceAuthStorageKey(workspace.slug)) ===
           "mock" ||
+          window.localStorage.getItem(getWorkspaceAuthStorageKey(workspace.slug)) ===
+            "firebase" ||
           window.localStorage.getItem(LEGACY_AUTH_STORAGE_KEY) === "mock")
     );
   });
@@ -764,6 +789,8 @@ export default function App() {
   const [isKnowledgeUpdating, setIsKnowledgeUpdating] = useState(false);
   const [knowledgeAuditStatus, setKnowledgeAuditStatus] = useState("");
   const [isCloudReady, setIsCloudReady] = useState(false);
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
 
   const selectedChannel = useMemo(
     () => channels.find((channel) => channel.id === selectedChannelId),
@@ -808,17 +835,39 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return subscribeToFirebaseAuth((user) => {
+      setFirebaseUser(user);
+      setIsAuthReady(true);
+
+      if (user) {
+        setProfile((currentProfile) => ({
+          ...currentProfile,
+          email: user.email || currentProfile.email
+        }));
+      } else {
+        setIsAuthenticated(false);
+        setIsCloudReady(false);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     let isCancelled = false;
 
     const hydrateFromFirebase = async () => {
       try {
+        if (!firebaseUser) {
+          setIsCloudReady(false);
+          return;
+        }
+
         const status = await fetchFirebaseStatus();
 
         if (!status.enabled) {
           return;
         }
 
-        const cloudWorkspaces = await fetchCloudWorkspaces();
+        const cloudWorkspaces = await fetchCloudWorkspaces(firebaseUser);
 
         if (isCancelled) {
           return;
@@ -845,10 +894,17 @@ export default function App() {
         }
 
         if (preferredWorkspace) {
-          const cloudChannels = await fetchCloudChannels(preferredWorkspace.slug);
+          const cloudChannels = await fetchCloudChannels(
+            preferredWorkspace.slug,
+            firebaseUser
+          );
 
           if (!isCancelled && cloudChannels.length > 0) {
             setChannels(cloudChannels);
+          }
+
+          if (!isCancelled) {
+            setIsAuthenticated(true);
           }
         }
 
@@ -867,7 +923,7 @@ export default function App() {
     return () => {
       isCancelled = true;
     };
-  }, []);
+  }, [firebaseUser]);
 
   useEffect(() => {
     window.localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
@@ -884,11 +940,13 @@ export default function App() {
         JSON.stringify(channels)
       );
 
-      if (isCloudReady) {
-        void saveCloudWorkspace(activeWorkspace, channels).catch(() => {});
+      if (isCloudReady && firebaseUser) {
+        void saveCloudWorkspace(activeWorkspace, channels, firebaseUser).catch(
+          () => {}
+        );
       }
     }
-  }, [activeWorkspace, channels, isCloudReady]);
+  }, [activeWorkspace, channels, isCloudReady, firebaseUser]);
 
   useEffect(() => {
     setKnowledgeAuditStatus("");
@@ -912,7 +970,7 @@ export default function App() {
     window.localStorage.setItem(CURRENT_WORKSPACE_STORAGE_KEY, workspace.slug);
   };
 
-  const createWorkspace = (workspaceName) => {
+  const createWorkspace = async (workspaceName) => {
     const slug = slugifyWorkspaceName(workspaceName);
 
     if (!slug) {
@@ -922,27 +980,27 @@ export default function App() {
       };
     }
 
+    const user = firebaseUser || (await signInWithGoogle());
     const workspace = {
       name: workspaceName.trim(),
       slug,
       createdAt: getNowIso()
     };
+    const workspaceChannels = normalizeChannels(initialChannels);
+
+    await saveCloudWorkspace(workspace, workspaceChannels, user);
 
     setWorkspaces((current) => {
       const withoutDuplicate = current.filter((item) => item.slug !== slug);
       return [...withoutDuplicate, workspace];
     });
-    const workspaceChannels = normalizeChannels(initialChannels);
-
     selectWorkspace(workspace, workspaceChannels);
     window.localStorage.setItem(
       getWorkspaceChannelsStorageKey(slug),
       JSON.stringify(workspaceChannels)
     );
-    window.localStorage.setItem(getWorkspaceAuthStorageKey(slug), "mock");
-    if (isCloudReady) {
-      void saveCloudWorkspace(workspace, workspaceChannels).catch(() => {});
-    }
+    window.localStorage.setItem(getWorkspaceAuthStorageKey(slug), "firebase");
+    setFirebaseUser(user);
     setIsAuthenticated(true);
     setRoute({ name: "login" });
     window.history.pushState(null, "", "/login");
@@ -953,11 +1011,14 @@ export default function App() {
     };
   };
 
-  const loginWithMockFirebase = (workspaceInput) => {
+  const loginWithGoogleWorkspace = async (workspaceInput) => {
+    const user = firebaseUser || (await signInWithGoogle());
     const requestedSlug =
       slugifyWorkspaceName(workspaceInput) || activeWorkspace?.slug || "";
+    const cloudWorkspaces = await fetchCloudWorkspaces(user).catch(() => []);
+    const mergedWorkspaces = mergeWorkspaces(workspaces, cloudWorkspaces);
     const workspace =
-      workspaces.find((item) => item.slug === requestedSlug) ||
+      mergedWorkspaces.find((item) => item.slug === requestedSlug) ||
       (activeWorkspace?.slug === requestedSlug ? activeWorkspace : null);
 
     if (!workspace) {
@@ -967,8 +1028,20 @@ export default function App() {
       };
     }
 
-    selectWorkspace(workspace);
-    window.localStorage.setItem(getWorkspaceAuthStorageKey(workspace.slug), "mock");
+    const cloudChannels = await fetchCloudChannels(workspace.slug, user).catch(
+      () => []
+    );
+
+    setWorkspaces(mergedWorkspaces);
+    selectWorkspace(
+      workspace,
+      cloudChannels.length > 0 ? cloudChannels : getInitialChannels(workspace.slug)
+    );
+    window.localStorage.setItem(
+      getWorkspaceAuthStorageKey(workspace.slug),
+      "firebase"
+    );
+    setFirebaseUser(user);
     setIsAuthenticated(true);
     setRoute({ name: "login" });
     window.history.pushState(null, "", "/login");
@@ -979,13 +1052,15 @@ export default function App() {
     };
   };
 
-  const logout = () => {
+  const logout = async () => {
     if (activeWorkspace) {
       window.localStorage.removeItem(
         getWorkspaceAuthStorageKey(activeWorkspace.slug)
       );
     }
     window.localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+    await signOutFromFirebase().catch(() => {});
+    setFirebaseUser(null);
     setIsAuthenticated(false);
   };
 
@@ -1434,6 +1509,7 @@ export default function App() {
   if (route.name === "signup") {
     return (
       <SignupPage
+        isAuthReady={isAuthReady}
         onNavigate={navigate}
         onCreateWorkspace={createWorkspace}
       />
@@ -1446,12 +1522,13 @@ export default function App() {
 
   if (!isAuthenticated) {
     return (
-      <LoginPage
-        activeWorkspace={activeWorkspace}
-        onNavigate={navigate}
-        onLogin={loginWithMockFirebase}
-        workspaces={workspaces}
-      />
+        <LoginPage
+          activeWorkspace={activeWorkspace}
+          isAuthReady={isAuthReady}
+          onNavigate={navigate}
+          onLogin={loginWithGoogleWorkspace}
+          workspaces={workspaces}
+        />
     );
   }
 
@@ -2449,17 +2526,27 @@ function NotFoundPage({ onNavigate }) {
   );
 }
 
-function SignupPage({ onNavigate, onCreateWorkspace }) {
+function SignupPage({ isAuthReady, onNavigate, onCreateWorkspace }) {
   const [workspaceName, setWorkspaceName] = useState("");
   const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const previewSlug = slugifyWorkspaceName(workspaceName) || "your-business";
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    const result = onCreateWorkspace(workspaceName);
+    setMessage("");
+    setIsSubmitting(true);
 
-    if (!result.ok) {
-      setMessage(result.message);
+    try {
+      const result = await onCreateWorkspace(workspaceName);
+
+      if (!result.ok) {
+        setMessage(result.message);
+      }
+    } catch (error) {
+      setMessage(error.message || "Google sign-in could not create this workspace.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -2487,8 +2574,8 @@ function SignupPage({ onNavigate, onCreateWorkspace }) {
           <p className="eyebrow">Create workspace</p>
           <h1>Sign up</h1>
           <p>
-            Name the workspace with the business name. Aotesys will turn it into
-            a workspace subdomain for the owner dashboard and visitor chat links.
+            Name the workspace with the business name, then continue with Google
+            to create the owner dashboard.
           </p>
         </div>
         <form className="auth-form" onSubmit={submit}>
@@ -2505,9 +2592,13 @@ function SignupPage({ onNavigate, onCreateWorkspace }) {
             <span>{previewSlug}.{APP_DOMAIN}</span>
           </div>
           {message && <p className="form-status">{message}</p>}
-          <button className="primary-button" type="submit">
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={!isAuthReady || isSubmitting}
+          >
             <ArrowRight size={18} />
-            <span>Create workspace</span>
+            <span>{isSubmitting ? "Opening Google..." : "Continue with Google"}</span>
           </button>
         </form>
       </section>
@@ -2515,18 +2606,28 @@ function SignupPage({ onNavigate, onCreateWorkspace }) {
   );
 }
 
-function LoginPage({ activeWorkspace, onNavigate, onLogin, workspaces }) {
+function LoginPage({ activeWorkspace, isAuthReady, onNavigate, onLogin, workspaces }) {
   const [workspaceInput, setWorkspaceInput] = useState(
     activeWorkspace?.slug || workspaces[0]?.slug || ""
   );
   const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    const result = onLogin(workspaceInput);
+    setMessage("");
+    setIsSubmitting(true);
 
-    if (!result.ok) {
-      setMessage(result.message);
+    try {
+      const result = await onLogin(workspaceInput);
+
+      if (!result.ok) {
+        setMessage(result.message);
+      }
+    } catch (error) {
+      setMessage(error.message || "Google sign-in could not open this workspace.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -2554,8 +2655,8 @@ function LoginPage({ activeWorkspace, onNavigate, onLogin, workspaces }) {
           <p className="eyebrow">Workspace access</p>
           <h1>Login</h1>
           <p>
-            Enter your workspace name or slug. For example, Online2Book opens as
-            online2book.{APP_DOMAIN}.
+            Enter your workspace name or slug, then continue with the Google
+            account that owns it.
           </p>
         </div>
         <form className="auth-form" onSubmit={submit}>
@@ -2574,9 +2675,13 @@ function LoginPage({ activeWorkspace, onNavigate, onLogin, workspaces }) {
             </span>
           </div>
           {message && <p className="form-status">{message}</p>}
-          <button className="primary-button" type="submit">
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={!isAuthReady || isSubmitting}
+          >
             <LogIn size={19} />
-            <span>Open workspace</span>
+            <span>{isSubmitting ? "Opening Google..." : "Continue with Google"}</span>
           </button>
         </form>
       </section>

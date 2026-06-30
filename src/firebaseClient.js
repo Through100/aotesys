@@ -1,5 +1,12 @@
 import { initializeApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
+import {
+  GoogleAuthProvider,
+  getAuth,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut
+} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey:
@@ -22,6 +29,12 @@ const firebaseConfig = {
 };
 
 export const firebaseApp = initializeApp(firebaseConfig);
+export const firebaseAuth = getAuth(firebaseApp);
+
+const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({
+  prompt: "select_account"
+});
 
 export async function initializeFirebaseAnalytics() {
   if (typeof window === "undefined" || !firebaseConfig.measurementId) {
@@ -33,4 +46,18 @@ export async function initializeFirebaseAnalytics() {
   }
 
   return getAnalytics(firebaseApp);
+}
+
+export function subscribeToFirebaseAuth(callback) {
+  return onAuthStateChanged(firebaseAuth, callback);
+}
+
+export async function signInWithGoogle() {
+  const result = await signInWithPopup(firebaseAuth, googleProvider);
+
+  return result.user;
+}
+
+export async function signOutFromFirebase() {
+  await signOut(firebaseAuth);
 }

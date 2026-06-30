@@ -6,3 +6,4 @@ npm-debug.log*
 vite.log
 vite.err.log
 tmp/
+.deploy/

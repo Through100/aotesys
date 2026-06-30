@@ -27,7 +27,13 @@ jobs:
         run: npm run build
 
       - name: Pack release
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
         run: |
+          mkdir -p .deploy
+          if [ -n "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+            printf '%s\n' "$FIREBASE_SERVICE_ACCOUNT_JSON" > .deploy/firebase-service-account.json
+          fi
           tar -czf aotesys-release.tgz \
             dist \
             src/seoContent.js \
@@ -35,7 +41,8 @@ jobs:
             ecosystem.config.cjs \
             package.json \
             package-lock.json \
-            .env.example
+            .env.example \
+            .deploy
 
       - name: Configure SSH
         env:

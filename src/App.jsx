@@ -44,6 +44,7 @@ import {
   getStructuredData,
   normalizePathname
 } from "./seoContent.js";
+import { initializeFirebaseAnalytics } from "./firebaseClient.js";
 
 const APP_NAME = "Aotesys";
 const APP_DOMAIN = "aotesys.com";
@@ -51,6 +52,7 @@ const LEGACY_AUTH_STORAGE_KEY = "sale-assist-auth";
 const LEGACY_CHANNELS_STORAGE_KEY = "sale-assist-channels";
 const WORKSPACES_STORAGE_KEY = "aotesys-workspaces";
 const CURRENT_WORKSPACE_STORAGE_KEY = "aotesys-current-workspace";
+const WORKSPACE_SYNC_TOKEN_STORAGE_PREFIX = "aotesys-sync-token";
 const UNSURE_MANAGER_REPLY =
   "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
 const OFF_TOPIC_REPLY =
@@ -521,6 +523,134 @@ async function requestBotReply(channel, conversation, text) {
   return response.json();
 }
 
+async function fetchFirebaseStatus() {
+  const response = await fetch("/api/firebase-status");
+
+  if (!response.ok) {
+    return { enabled: false };
+  }
+
+  return response.json();
+}
+
+async function fetchCloudWorkspaces() {
+  const response = await fetch("/api/workspaces");
+
+  if (!response.ok) {
+    throw new Error("Firebase workspaces request failed.");
+  }
+
+  const result = await response.json();
+
+  return Array.isArray(result.workspaces) ? result.workspaces : [];
+}
+
+async function saveCloudWorkspace(workspace, channels) {
+  const syncToken = ensureWorkspaceSyncToken(workspace.slug);
+  const response = await fetch("/api/workspaces", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      workspace,
+      channels,
+      syncToken
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error("Firebase workspace save failed.");
+  }
+}
+
+async function fetchCloudChannels(workspaceSlug) {
+  const syncToken = getStoredWorkspaceSyncToken(workspaceSlug);
+
+  if (!syncToken) {
+    return [];
+  }
+
+  const response = await fetch(
+    `/api/workspaces/${encodeURIComponent(workspaceSlug)}/channels`,
+    {
+      headers: {
+        "x-aotesys-workspace-token": syncToken
+      }
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Firebase channels request failed.");
+  }
+
+  const result = await response.json();
+
+  return normalizeChannels(
+    Array.isArray(result.channels) ? result.channels : []
+  );
+}
+
+function mergeWorkspaces(localWorkspaces, cloudWorkspaces) {
+  const workspaceMap = new Map();
+
+  for (const workspace of [...localWorkspaces, ...cloudWorkspaces]) {
+    if (workspace?.slug && workspace?.name) {
+      workspaceMap.set(workspace.slug, {
+        name: workspace.name,
+        slug: workspace.slug,
+        createdAt: workspace.createdAt || getNowIso()
+      });
+    }
+  }
+
+  return [...workspaceMap.values()].sort(
+    (left, right) =>
+      Date.parse(left.createdAt || "") - Date.parse(right.createdAt || "")
+  );
+}
+
+function getPreferredWorkspace(workspaces) {
+  const hostSlug = getWorkspaceSlugFromHost();
+  const storedSlug = window.localStorage.getItem(CURRENT_WORKSPACE_STORAGE_KEY);
+  const selectedSlug = hostSlug || storedSlug;
+
+  if (selectedSlug) {
+    return workspaces.find((workspace) => workspace.slug === selectedSlug) || null;
+  }
+
+  return workspaces[0] || null;
+}
+
+function getWorkspaceSyncTokenStorageKey(workspaceSlug) {
+  return `${WORKSPACE_SYNC_TOKEN_STORAGE_PREFIX}-${workspaceSlug || "default"}`;
+}
+
+function getStoredWorkspaceSyncToken(workspaceSlug) {
+  return window.localStorage.getItem(getWorkspaceSyncTokenStorageKey(workspaceSlug));
+}
+
+function ensureWorkspaceSyncToken(workspaceSlug) {
+  const storageKey = getWorkspaceSyncTokenStorageKey(workspaceSlug);
+  const storedToken = window.localStorage.getItem(storageKey);
+
+  if (storedToken) {
+    return storedToken;
+  }
+
+  const token = generateWorkspaceSyncToken();
+  window.localStorage.setItem(storageKey, token);
+
+  return token;
+}
+
+function generateWorkspaceSyncToken() {
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function buildFallbackBotReply(text, visitorName, detectedName) {
   const lowerText = text.toLowerCase();
 
@@ -633,6 +763,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [isKnowledgeUpdating, setIsKnowledgeUpdating] = useState(false);
   const [knowledgeAuditStatus, setKnowledgeAuditStatus] = useState("");
+  const [isCloudReady, setIsCloudReady] = useState(false);
 
   const selectedChannel = useMemo(
     () => channels.find((channel) => channel.id === selectedChannelId),
@@ -673,6 +804,72 @@ export default function App() {
   }, [route.name]);
 
   useEffect(() => {
+    void initializeFirebaseAnalytics();
+  }, []);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const hydrateFromFirebase = async () => {
+      try {
+        const status = await fetchFirebaseStatus();
+
+        if (!status.enabled) {
+          return;
+        }
+
+        const cloudWorkspaces = await fetchCloudWorkspaces();
+
+        if (isCancelled) {
+          return;
+        }
+
+        const mergedWorkspaces = mergeWorkspaces(
+          getStoredWorkspaces(),
+          cloudWorkspaces
+        );
+        const preferredWorkspace = getPreferredWorkspace(mergedWorkspaces);
+
+        setWorkspaces(mergedWorkspaces);
+
+        if (preferredWorkspace) {
+          setActiveWorkspace(preferredWorkspace);
+          setProfile((currentProfile) => ({
+            ...currentProfile,
+            businessName: preferredWorkspace.name
+          }));
+          window.localStorage.setItem(
+            CURRENT_WORKSPACE_STORAGE_KEY,
+            preferredWorkspace.slug
+          );
+        }
+
+        if (preferredWorkspace) {
+          const cloudChannels = await fetchCloudChannels(preferredWorkspace.slug);
+
+          if (!isCancelled && cloudChannels.length > 0) {
+            setChannels(cloudChannels);
+          }
+        }
+
+        if (!isCancelled) {
+          setIsCloudReady(true);
+        }
+      } catch {
+        if (!isCancelled) {
+          setIsCloudReady(false);
+        }
+      }
+    };
+
+    void hydrateFromFirebase();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
   }, [workspaces]);
 
@@ -686,8 +883,12 @@ export default function App() {
         getWorkspaceChannelsStorageKey(activeWorkspace.slug),
         JSON.stringify(channels)
       );
+
+      if (isCloudReady) {
+        void saveCloudWorkspace(activeWorkspace, channels).catch(() => {});
+      }
     }
-  }, [activeWorkspace, channels]);
+  }, [activeWorkspace, channels, isCloudReady]);
 
   useEffect(() => {
     setKnowledgeAuditStatus("");
@@ -739,6 +940,9 @@ export default function App() {
       JSON.stringify(workspaceChannels)
     );
     window.localStorage.setItem(getWorkspaceAuthStorageKey(slug), "mock");
+    if (isCloudReady) {
+      void saveCloudWorkspace(workspace, workspaceChannels).catch(() => {});
+    }
     setIsAuthenticated(true);
     setRoute({ name: "login" });
     window.history.pushState(null, "", "/login");

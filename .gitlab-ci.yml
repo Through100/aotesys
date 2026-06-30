@@ -12,7 +12,12 @@ build:
   script:
     - npm ci
     - npm run build
-    - tar -czf aotesys-release.tgz dist src/seoContent.js server.js ecosystem.config.cjs package.json package-lock.json .env.example
+    - mkdir -p .deploy
+    - |
+      if [ -n "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+        printf '%s\n' "$FIREBASE_SERVICE_ACCOUNT_JSON" > .deploy/firebase-service-account.json
+      fi
+    - tar -czf aotesys-release.tgz dist src/seoContent.js server.js ecosystem.config.cjs package.json package-lock.json .env.example .deploy
   artifacts:
     expire_in: 1 day
     paths:

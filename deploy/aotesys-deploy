@@ -31,6 +31,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+upsert_env_var() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+  local temp_file
+
+  temp_file="$(mktemp "$APP_DIR/.env-XXXXXX")"
+  touch "$env_file"
+  grep -v "^${key}=" "$env_file" > "$temp_file" || true
+  printf '%s=%s\n' "$key" "$value" >> "$temp_file"
+  install -m 0600 "$temp_file" "$env_file"
+  rm -f "$temp_file"
+}
+
 tar -xzf "$ARCHIVE" -C "$STAGING_DIR"
 
 test -d "$STAGING_DIR/dist"
@@ -43,6 +57,14 @@ test -f "$STAGING_DIR/package-lock.json"
 if [[ -f "$SHARED_DIR/.env" ]]; then
   ln -sfn "$SHARED_DIR/.env" "$STAGING_DIR/.env"
 fi
+
+if [[ -f "$STAGING_DIR/.deploy/firebase-service-account.json" ]]; then
+  install -m 0600 "$STAGING_DIR/.deploy/firebase-service-account.json" "$SHARED_DIR/firebase-service-account.json"
+  upsert_env_var "$SHARED_DIR/.env" "FIREBASE_SERVICE_ACCOUNT_PATH" "$SHARED_DIR/firebase-service-account.json"
+  ln -sfn "$SHARED_DIR/.env" "$STAGING_DIR/.env"
+fi
+
+rm -rf "$STAGING_DIR/.deploy"
 
 (
   cd "$STAGING_DIR"

@@ -1,7 +1,10 @@
 import express from "express";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { cert, getApps, initializeApp as initializeAdminApp } from "firebase-admin/app";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { createServer as createViteServer } from "vite";
 import {
   DEFAULT_IMAGE,
@@ -23,8 +26,11 @@ const MANAGER_HANDOFF_REPLY =
   "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
 const OFF_TOPIC_REPLY =
   "I can only help with questions related to this business. If you have a business question, please send it here.";
+const WORKSPACE_SYNC_TOKEN_HEADER = "x-aotesys-workspace-token";
 
 loadEnvFile(path.join(__dirname, ".env"));
+
+const firebaseAdmin = initializeFirebaseAdmin();
 
 const app = express();
 app.disable("x-powered-by");
@@ -35,6 +41,110 @@ if (isProduction) {
   app.use(applyProductionHeaders);
   app.use(redirectCanonicalHost);
 }
+
+app.get("/api/firebase-status", (request, response) => {
+  response.json({
+    enabled: Boolean(firebaseAdmin.db),
+    projectId: firebaseAdmin.projectId
+  });
+});
+
+app.get("/api/workspaces", async (request, response) => {
+  try {
+    const db = requireFirebaseDb();
+    const snapshot = await db.collection("workspaces").orderBy("createdAt").get();
+
+    response.json({
+      workspaces: snapshot.docs.map((doc) => normalizeWorkspaceDoc(doc))
+    });
+  } catch (error) {
+    sendFirebaseError(response, error);
+  }
+});
+
+app.post("/api/workspaces", async (request, response) => {
+  try {
+    const db = requireFirebaseDb();
+    const workspace = sanitizeWorkspace(request.body?.workspace || request.body);
+    const channels = normalizeChannelsPayload(request.body?.channels);
+    const syncToken = getWorkspaceSyncToken(request);
+    const workspaceRef = db.collection("workspaces").doc(workspace.slug);
+    const workspaceSnapshot = await workspaceRef.get();
+    const syncTokenHash = hashWorkspaceSyncToken(syncToken);
+
+    assertWorkspaceTokenMatch(workspaceSnapshot, syncTokenHash);
+
+    await workspaceRef.set(
+      {
+        ...workspace,
+        syncTokenHash,
+        updatedAt: FieldValue.serverTimestamp(),
+        createdAt: workspace.createdAt || FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    if (channels.length > 0) {
+      await workspaceRef.collection("state").doc("channels").set(
+        {
+          channels,
+          updatedAt: FieldValue.serverTimestamp()
+        },
+        { merge: true }
+      );
+    }
+
+    response.status(201).json({ workspace });
+  } catch (error) {
+    sendFirebaseError(response, error);
+  }
+});
+
+app.get("/api/workspaces/:workspaceSlug/channels", async (request, response) => {
+  try {
+    const db = requireFirebaseDb();
+    const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
+    await requireWorkspaceAccess(db, workspaceSlug, getWorkspaceSyncToken(request));
+    const snapshot = await db
+      .collection("workspaces")
+      .doc(workspaceSlug)
+      .collection("state")
+      .doc("channels")
+      .get();
+
+    response.json({
+      channels: normalizeChannelsPayload(snapshot.data()?.channels)
+    });
+  } catch (error) {
+    sendFirebaseError(response, error);
+  }
+});
+
+app.put("/api/workspaces/:workspaceSlug/channels", async (request, response) => {
+  try {
+    const db = requireFirebaseDb();
+    const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
+    const channels = normalizeChannelsPayload(request.body?.channels);
+    await requireWorkspaceAccess(db, workspaceSlug, getWorkspaceSyncToken(request));
+
+    await db
+      .collection("workspaces")
+      .doc(workspaceSlug)
+      .collection("state")
+      .doc("channels")
+      .set(
+        {
+          channels,
+          updatedAt: FieldValue.serverTimestamp()
+        },
+        { merge: true }
+      );
+
+    response.json({ ok: true });
+  } catch (error) {
+    sendFirebaseError(response, error);
+  }
+});
 
 app.post("/api/chat", async (request, response) => {
   try {
@@ -107,7 +217,7 @@ function applyProductionHeaders(request, response, next) {
   );
   response.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://www.google-analytics.com https://region1.google-analytics.com https://*.google-analytics.com https://firebase.googleapis.com https://firestore.googleapis.com; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
   );
   next();
 }
@@ -226,6 +336,209 @@ function loadEnvFile(envPath) {
       process.env[key] = value;
     }
   }
+}
+
+function initializeFirebaseAdmin() {
+  const serviceAccount = getFirebaseServiceAccount();
+
+  if (!serviceAccount) {
+    return {
+      db: null,
+      projectId: ""
+    };
+  }
+
+  const app =
+    getApps()[0] ||
+    initializeAdminApp({
+      credential: cert(serviceAccount)
+    });
+
+  return {
+    db: getFirestore(app),
+    projectId: serviceAccount.project_id || ""
+  };
+}
+
+function getFirebaseServiceAccount() {
+  const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+
+  try {
+    if (rawJson) {
+      return normalizeServiceAccount(JSON.parse(rawJson));
+    }
+
+    if (serviceAccountPath && existsSync(serviceAccountPath)) {
+      return normalizeServiceAccount(
+        JSON.parse(readFileSync(serviceAccountPath, "utf8"))
+      );
+    }
+  } catch (error) {
+    console.error("Firebase service account could not be loaded:", error.message);
+  }
+
+  return null;
+}
+
+function normalizeServiceAccount(serviceAccount) {
+  return {
+    ...serviceAccount,
+    private_key: String(serviceAccount.private_key || "").replace(/\\n/g, "\n")
+  };
+}
+
+function requireFirebaseDb() {
+  if (!firebaseAdmin.db) {
+    const error = new Error("Firebase Admin is not configured.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  return firebaseAdmin.db;
+}
+
+function normalizeWorkspaceDoc(doc) {
+  const data = doc.data() || {};
+
+  return {
+    name: String(data.name || doc.id),
+    slug: String(data.slug || doc.id),
+    createdAt: toIsoString(data.createdAt) || new Date(0).toISOString()
+  };
+}
+
+function sanitizeWorkspace(value) {
+  const slug = sanitizeSlug(value?.slug);
+  const name = String(value?.name || "").trim().slice(0, 120);
+
+  if (!name) {
+    throwBadRequest("Workspace name is required.");
+  }
+
+  return {
+    name,
+    slug,
+    createdAt: String(value?.createdAt || new Date().toISOString())
+  };
+}
+
+function sanitizeSlug(value) {
+  const slug = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+
+  if (!slug) {
+    throwBadRequest("Workspace slug is required.");
+  }
+
+  return slug;
+}
+
+function getWorkspaceSyncToken(request) {
+  const token = String(
+    request.get(WORKSPACE_SYNC_TOKEN_HEADER) || request.body?.syncToken || ""
+  ).trim();
+
+  if (token.length < 24 || token.length > 160) {
+    throwBadRequest("Workspace sync token is required.");
+  }
+
+  return token;
+}
+
+function hashWorkspaceSyncToken(syncToken) {
+  return createHash("sha256").update(syncToken).digest("hex");
+}
+
+async function requireWorkspaceAccess(db, workspaceSlug, syncToken) {
+  const workspaceSnapshot = await db.collection("workspaces").doc(workspaceSlug).get();
+
+  if (!workspaceSnapshot.exists) {
+    const error = new Error("Workspace not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  assertWorkspaceTokenMatch(workspaceSnapshot, hashWorkspaceSyncToken(syncToken));
+}
+
+function assertWorkspaceTokenMatch(workspaceSnapshot, syncTokenHash) {
+  const savedTokenHash = workspaceSnapshot.data()?.syncTokenHash;
+
+  if (workspaceSnapshot.exists && savedTokenHash && savedTokenHash !== syncTokenHash) {
+    const error = new Error("Workspace sync token is invalid.");
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+function normalizeChannelsPayload(channels) {
+  if (!Array.isArray(channels)) {
+    return [];
+  }
+
+  return channels.map((channel) => ({
+    id: String(channel?.id || ""),
+    name: String(channel?.name || ""),
+    promptUpdatedAt: String(channel?.promptUpdatedAt || ""),
+    prompt: String(channel?.prompt || ""),
+    autoKnowledgeEnabled: Boolean(channel?.autoKnowledgeEnabled),
+    autoKnowledgePrompt: String(channel?.autoKnowledgePrompt || ""),
+    autoKnowledgeUpdatedAt: String(channel?.autoKnowledgeUpdatedAt || ""),
+    autoKnowledgeLastRunAt: String(channel?.autoKnowledgeLastRunAt || ""),
+    conversations: Array.isArray(channel?.conversations)
+      ? channel.conversations.map(normalizeConversationPayload)
+      : []
+  }));
+}
+
+function normalizeConversationPayload(conversation) {
+  return {
+    id: String(conversation?.id || ""),
+    visitorName: String(conversation?.visitorName || "Visitor"),
+    status: String(conversation?.status || "Bot active"),
+    lastSeen: String(conversation?.lastSeen || "Just now"),
+    lastActivityAt: String(conversation?.lastActivityAt || ""),
+    autoKnowledgeAuditedAt: String(conversation?.autoKnowledgeAuditedAt || ""),
+    archived: Boolean(conversation?.archived),
+    messages: Array.isArray(conversation?.messages)
+      ? conversation.messages.map((message) => ({
+          id: Number(message?.id) || 1,
+          role: String(message?.role || "bot"),
+          text: String(message?.text || "")
+        }))
+      : []
+  };
+}
+
+function toIsoString(value) {
+  if (!value) {
+    return "";
+  }
+
+  if (typeof value.toDate === "function") {
+    return value.toDate().toISOString();
+  }
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function throwBadRequest(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  throw error;
+}
+
+function sendFirebaseError(response, error) {
+  response.status(error.statusCode || 500).json({
+    error: error.message || "Firebase request failed."
+  });
 }
 
 async function createOllamaReply(payload) {

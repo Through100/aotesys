@@ -873,10 +873,7 @@ export default function App() {
           return;
         }
 
-        const mergedWorkspaces = mergeWorkspaces(
-          getStoredWorkspaces(),
-          cloudWorkspaces
-        );
+        const mergedWorkspaces = mergeWorkspaces([], cloudWorkspaces);
         const preferredWorkspace = getPreferredWorkspace(mergedWorkspaces);
 
         setWorkspaces(mergedWorkspaces);
@@ -906,10 +903,12 @@ export default function App() {
           if (!isCancelled) {
             setIsAuthenticated(true);
           }
-        } else if (!isCancelled && route.name === "login") {
-          setIsAuthenticated(false);
-          setRoute({ name: "signup" });
-          window.history.replaceState(null, "", "/signup");
+        } else if (!isCancelled) {
+          setActiveWorkspace(null);
+          setChannels(normalizeChannels(initialChannels));
+          setSelectedChannelId("channel-a");
+          setSelectedConversationId("maria-lee");
+          setIsAuthenticated(true);
         }
 
         if (!isCancelled) {
@@ -1024,9 +1023,13 @@ export default function App() {
     if (!workspace) {
       setFirebaseUser(user);
       setWorkspaces([]);
-      setIsAuthenticated(false);
-      setRoute({ name: "signup" });
-      window.history.pushState(null, "", "/signup");
+      setActiveWorkspace(null);
+      setChannels(normalizeChannels(initialChannels));
+      setSelectedChannelId("channel-a");
+      setSelectedConversationId("maria-lee");
+      setIsAuthenticated(true);
+      setRoute({ name: "login" });
+      window.history.pushState(null, "", "/login");
 
       return {
         ok: true,
@@ -1512,7 +1515,7 @@ export default function App() {
     return <MarketingPage routeName={route.name} onNavigate={navigate} />;
   }
 
-  if (route.name === "signup") {
+  if (route.name === "signup" && !firebaseUser) {
     return (
       <SignupPage
         isAuthReady={isAuthReady}
@@ -1532,6 +1535,17 @@ export default function App() {
         isAuthReady={isAuthReady}
         onNavigate={navigate}
         onLogin={loginWithGoogleWorkspace}
+      />
+    );
+  }
+
+  if (isAuthenticated && !activeWorkspace) {
+    return (
+      <WorkspaceOnboardingPage
+        userEmail={firebaseUser?.email || profile.email}
+        onCreateWorkspace={createWorkspace}
+        onNavigate={navigate}
+        onSignOut={logout}
       />
     );
   }
@@ -2603,6 +2617,88 @@ function SignupPage({ isAuthReady, onNavigate, onCreateWorkspace }) {
           >
             <ArrowRight size={18} />
             <span>{isSubmitting ? "Opening Google..." : "Continue with Google"}</span>
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function WorkspaceOnboardingPage({
+  userEmail,
+  onCreateWorkspace,
+  onNavigate,
+  onSignOut
+}) {
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const previewSlug = slugifyWorkspaceName(workspaceName) || "your-business";
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setMessage("");
+    setIsSubmitting(true);
+
+    try {
+      const result = await onCreateWorkspace(workspaceName);
+
+      if (!result.ok) {
+        setMessage(result.message);
+      }
+    } catch (error) {
+      setMessage(error.message || "Workspace could not be created.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="login-page">
+      <header className="topbar">
+        <button className="brand-button" onClick={() => onNavigate("home")}>
+          <Bot size={22} />
+          <span>{APP_NAME}</span>
+        </button>
+        <div className="topbar-actions">
+          <button className="secondary-button" onClick={onSignOut}>
+            <LogIn size={18} />
+            <span>Sign out</span>
+          </button>
+        </div>
+      </header>
+
+      <section className="login-panel">
+        <div>
+          <p className="eyebrow">Signed in{userEmail ? ` as ${userEmail}` : ""}</p>
+          <h1>Create Workspace</h1>
+          <p>
+            Use your business name. Aotesys will create the owner dashboard and
+            public workspace address from it.
+          </p>
+        </div>
+        <form className="auth-form" onSubmit={submit}>
+          <label>
+            <span>Business or workspace name</span>
+            <input
+              value={workspaceName}
+              placeholder="Online2Book"
+              onChange={(event) => setWorkspaceName(event.target.value)}
+              autoFocus
+            />
+          </label>
+          <div className="workspace-preview">
+            <Building2 size={18} />
+            <span>{previewSlug}.{APP_DOMAIN}</span>
+          </div>
+          {message && <p className="form-status">{message}</p>}
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={isSubmitting}
+          >
+            <ArrowRight size={18} />
+            <span>{isSubmitting ? "Creating..." : "Create workspace"}</span>
           </button>
         </form>
       </section>

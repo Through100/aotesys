@@ -1152,6 +1152,56 @@ export default function App() {
     setKnowledgeAuditStatus("");
   }, [selectedChannelId]);
 
+  useEffect(() => {
+    if (
+      !selectedChannel ||
+      !selectedChannel.autoKnowledgeEnabled ||
+      !selectedChannel.receptionistLearningEnabled
+    ) {
+      return;
+    }
+
+    const hasOwnerSetup = selectedChannel.conversations.some(
+      (conversation) => conversation.receptionistLearning?.type === "owner-setup"
+    );
+
+    if (hasOwnerSetup) {
+      return;
+    }
+
+    const setupConversation = buildOwnerSetupConversation(
+      selectedChannel.id,
+      selectedChannel.name
+    );
+
+    setChannels((current) =>
+      current.map((channel) => {
+        if (channel.id !== selectedChannel.id) {
+          return channel;
+        }
+
+        if (
+          channel.conversations.some(
+            (conversation) =>
+              conversation.receptionistLearning?.type === "owner-setup"
+          )
+        ) {
+          return channel;
+        }
+
+        return {
+          ...channel,
+          conversations: [setupConversation, ...channel.conversations]
+        };
+      })
+    );
+    setSelectedConversationId(setupConversation.id);
+  }, [
+    selectedChannel?.id,
+    selectedChannel?.autoKnowledgeEnabled,
+    selectedChannel?.receptionistLearningEnabled
+  ]);
+
   const navigate = (nextRoute) => {
     const path = getPageMetadataByName(nextRoute)?.path || "/login";
     window.history.pushState(null, "", path);
@@ -1329,7 +1379,13 @@ export default function App() {
     setChannels((current) =>
       current.map((channel) =>
         channel.id === selectedChannelId
-          ? { ...channel, receptionistLearningEnabled }
+          ? {
+              ...channel,
+              receptionistLearningEnabled,
+              autoKnowledgeEnabled: receptionistLearningEnabled
+                ? true
+                : channel.autoKnowledgeEnabled
+            }
           : channel
       )
     );
@@ -3354,6 +3410,16 @@ function ConversationPanel({
 }) {
   const [conversationMode, setConversationMode] = useState("chats");
   const isSettingsMode = conversationMode === "settings";
+  const ownerConversations = conversations.filter(
+    (conversation) => conversation.receptionistLearning
+  );
+  const visitorConversations = conversations.filter(
+    (conversation) => !conversation.receptionistLearning
+  );
+  const showOwnerFrame = Boolean(
+    selectedChannel?.autoKnowledgeEnabled &&
+      selectedChannel?.receptionistLearningEnabled
+  );
   const knowledgeAuditStats = useMemo(
     () => getKnowledgeAuditStats(selectedChannel),
     [selectedChannel]
@@ -3521,14 +3587,52 @@ function ConversationPanel({
       ) : (
       <div className="conversation-grid">
         <aside className="visitor-panel">
-          <div className="panel-heading">
+          {showOwnerFrame && (
+            <div className="owner-learning-frame">
+              <div className="panel-heading">
+                <h2>Owner / Receptionist setup</h2>
+              </div>
+              <div className="visitor-list owner-learning-list">
+                {ownerConversations.length === 0 && (
+                  <div className="empty-panel">
+                    The receptionist setup conversation will appear here.
+                  </div>
+                )}
+                {ownerConversations.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    className={
+                      [
+                        "visitor-button",
+                        "learning-thread",
+                        conversation.id === selectedConversation?.id
+                          ? "active"
+                          : ""
+                      ]
+                        .filter(Boolean)
+                        .join(" ")
+                    }
+                    onClick={() => onConversationChange(conversation.id)}
+                  >
+                    <div>
+                      <strong>{conversation.visitorName}</strong>
+                      <span>{conversation.lastSeen}</span>
+                    </div>
+                    <small>{conversation.status}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="panel-heading visitor-heading">
             <h2>Visitors</h2>
           </div>
           <div className="visitor-list">
-            {conversations.length === 0 && (
+            {visitorConversations.length === 0 && (
               <div className="empty-panel">No active conversations</div>
             )}
-            {conversations.map((conversation) => (
+            {visitorConversations.map((conversation) => (
               <button
                 key={conversation.id}
                 className={

@@ -1,6 +1,6 @@
 import express from "express";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -30,7 +30,9 @@ const OFF_TOPIC_REPLY =
 const WORKSPACE_SYNC_TOKEN_HEADER = "x-aotesys-workspace-token";
 const FIREBASE_AUTH_ORIGIN = "https://aotesys-9c7a5.firebaseapp.com";
 
-loadEnvFile(path.join(__dirname, ".env"));
+const runtimeEnvPath = resolveRuntimeEnvPath();
+ensureRuntimeEnvTemplate(runtimeEnvPath);
+loadEnvFile(runtimeEnvPath);
 
 const firebaseAdmin = initializeFirebaseAdmin();
 const appDatabase = initializeAppDatabase();
@@ -488,6 +490,50 @@ function escapeHtmlAttribute(value) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveRuntimeEnvPath() {
+  const sharedEnvPath = "/var/www/vhosts/aotesys.com/shared/.env";
+
+  if (isProduction && existsSync(path.dirname(sharedEnvPath))) {
+    return sharedEnvPath;
+  }
+
+  return path.join(__dirname, ".env");
+}
+
+function ensureRuntimeEnvTemplate(envPath) {
+  if (!isProduction) {
+    return;
+  }
+
+  const templateEntries = [
+    ["OLLAMA_BASE_URL", "https://ollama.com/api"],
+    ["OLLAMA_MODEL", ""],
+    ["OLLAMA_API_KEY", ""],
+    ["AUTO_KNOWLEDGE_MODEL", ""]
+  ];
+
+  mkdirSync(path.dirname(envPath), { recursive: true });
+
+  const existingContent = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const existingKeys = new Set(
+    existingContent
+      .split(/\r?\n/)
+      .map((line) => line.match(/^\s*([^#=]+)=/)?.[1]?.trim())
+      .filter(Boolean)
+  );
+  const missingLines = templateEntries
+    .filter(([key]) => !existingKeys.has(key))
+    .map(([key, value]) => `${key}=${value}`);
+
+  if (missingLines.length === 0) {
+    return;
+  }
+
+  const prefix = existingContent.trim() ? "\n\n" : "";
+  const nextContent = `${existingContent}${prefix}# Aotesys chatbot model settings\n${missingLines.join("\n")}\n`;
+  writeFileSync(envPath, nextContent, { mode: 0o600 });
 }
 
 function loadEnvFile(envPath) {

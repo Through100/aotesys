@@ -374,6 +374,18 @@ function getFirebaseServiceAccount() {
         JSON.parse(readFileSync(serviceAccountPath, "utf8"))
       );
     }
+
+    const bundledServiceAccountPath = path.join(
+      __dirname,
+      ".deploy",
+      "firebase-service-account.json"
+    );
+
+    if (existsSync(bundledServiceAccountPath)) {
+      return normalizeServiceAccount(
+        JSON.parse(readFileSync(bundledServiceAccountPath, "utf8"))
+      );
+    }
   } catch (error) {
     console.error("Firebase service account could not be loaded:", error.message);
   }

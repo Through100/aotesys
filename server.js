@@ -28,6 +28,7 @@ const MANAGER_HANDOFF_REPLY =
 const OFF_TOPIC_REPLY =
   "I can only help with questions related to this business. If you have a business question, please send it here.";
 const WORKSPACE_SYNC_TOKEN_HEADER = "x-aotesys-workspace-token";
+const FIREBASE_AUTH_ORIGIN = "https://aotesys-9c7a5.firebaseapp.com";
 
 loadEnvFile(path.join(__dirname, ".env"));
 
@@ -184,6 +185,8 @@ app.post("/api/auto-knowledge", async (request, response) => {
   }
 });
 
+app.use("/__/auth", proxyFirebaseAuthHandler);
+
 if (isProduction) {
   const distPath = path.join(__dirname, "dist");
   app.use(express.static(distPath, { index: false }));
@@ -258,6 +261,51 @@ function redirectCanonicalHost(request, response, next) {
   }
 
   next();
+}
+
+async function proxyFirebaseAuthHandler(request, response) {
+  if (!["GET", "HEAD"].includes(request.method)) {
+    response.sendStatus(405);
+    return;
+  }
+
+  try {
+    const targetUrl = new URL(request.originalUrl, FIREBASE_AUTH_ORIGIN);
+    const firebaseResponse = await fetch(targetUrl, {
+      method: request.method,
+      headers: {
+        accept: request.headers.accept || "*/*",
+        "accept-language": request.headers["accept-language"] || "en-US,en;q=0.9",
+        "user-agent": request.headers["user-agent"] || "Aotesys auth proxy"
+      },
+      redirect: "manual"
+    });
+
+    response.status(firebaseResponse.status);
+    copyProxyHeader(firebaseResponse, response, "cache-control");
+    copyProxyHeader(firebaseResponse, response, "content-type");
+    copyProxyHeader(firebaseResponse, response, "etag");
+    copyProxyHeader(firebaseResponse, response, "location");
+
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
+
+    const body = Buffer.from(await firebaseResponse.arrayBuffer());
+    response.send(body);
+  } catch (error) {
+    console.error("Firebase auth proxy failed:", error.message);
+    response.status(502).type("text/plain").send("Firebase auth proxy failed.");
+  }
+}
+
+function copyProxyHeader(sourceResponse, targetResponse, headerName) {
+  const value = sourceResponse.headers.get(headerName);
+
+  if (value) {
+    targetResponse.setHeader(headerName, value);
+  }
 }
 
 function renderIndexForRoute(distPath, routeName) {

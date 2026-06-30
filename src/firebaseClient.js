@@ -12,9 +12,7 @@ const firebaseConfig = {
   apiKey:
     import.meta.env.VITE_FIREBASE_API_KEY ||
     "AIzaSyDFuwmHWwbcdfMQ-r35ZoewHI8W1L-9-E4",
-  authDomain:
-    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
-    "aotesys-9c7a5.firebaseapp.com",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "aotesys.com",
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "aotesys-9c7a5",
   storageBucket:
     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||

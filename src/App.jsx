@@ -906,6 +906,10 @@ export default function App() {
           if (!isCancelled) {
             setIsAuthenticated(true);
           }
+        } else if (!isCancelled && route.name === "login") {
+          setIsAuthenticated(false);
+          setRoute({ name: "signup" });
+          window.history.replaceState(null, "", "/signup");
         }
 
         if (!isCancelled) {
@@ -923,7 +927,7 @@ export default function App() {
     return () => {
       isCancelled = true;
     };
-  }, [firebaseUser]);
+  }, [firebaseUser, route.name]);
 
   useEffect(() => {
     window.localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
@@ -1011,20 +1015,22 @@ export default function App() {
     };
   };
 
-  const loginWithGoogleWorkspace = async (workspaceInput) => {
+  const loginWithGoogleWorkspace = async () => {
     const user = firebaseUser || (await signInWithGoogle());
-    const requestedSlug =
-      slugifyWorkspaceName(workspaceInput) || activeWorkspace?.slug || "";
     const cloudWorkspaces = await fetchCloudWorkspaces(user).catch(() => []);
-    const mergedWorkspaces = mergeWorkspaces(workspaces, cloudWorkspaces);
-    const workspace =
-      mergedWorkspaces.find((item) => item.slug === requestedSlug) ||
-      (activeWorkspace?.slug === requestedSlug ? activeWorkspace : null);
+    const mergedWorkspaces = mergeWorkspaces(getStoredWorkspaces(), cloudWorkspaces);
+    const workspace = getPreferredWorkspace(mergedWorkspaces);
 
     if (!workspace) {
+      setFirebaseUser(user);
+      setWorkspaces([]);
+      setIsAuthenticated(false);
+      setRoute({ name: "signup" });
+      window.history.pushState(null, "", "/signup");
+
       return {
-        ok: false,
-        message: "Workspace not found. Create it with Sign up first."
+        ok: true,
+        workspace: null
       };
     }
 
@@ -1522,13 +1528,11 @@ export default function App() {
 
   if (!isAuthenticated) {
     return (
-        <LoginPage
-          activeWorkspace={activeWorkspace}
-          isAuthReady={isAuthReady}
-          onNavigate={navigate}
-          onLogin={loginWithGoogleWorkspace}
-          workspaces={workspaces}
-        />
+      <LoginPage
+        isAuthReady={isAuthReady}
+        onNavigate={navigate}
+        onLogin={loginWithGoogleWorkspace}
+      />
     );
   }
 
@@ -2606,10 +2610,7 @@ function SignupPage({ isAuthReady, onNavigate, onCreateWorkspace }) {
   );
 }
 
-function LoginPage({ activeWorkspace, isAuthReady, onNavigate, onLogin, workspaces }) {
-  const [workspaceInput, setWorkspaceInput] = useState(
-    activeWorkspace?.slug || workspaces[0]?.slug || ""
-  );
+function LoginPage({ isAuthReady, onNavigate, onLogin }) {
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -2619,7 +2620,7 @@ function LoginPage({ activeWorkspace, isAuthReady, onNavigate, onLogin, workspac
     setIsSubmitting(true);
 
     try {
-      const result = await onLogin(workspaceInput);
+      const result = await onLogin();
 
       if (!result.ok) {
         setMessage(result.message);
@@ -2655,24 +2656,14 @@ function LoginPage({ activeWorkspace, isAuthReady, onNavigate, onLogin, workspac
           <p className="eyebrow">Workspace access</p>
           <h1>Login</h1>
           <p>
-            Enter your workspace name or slug, then continue with the Google
-            account that owns it.
+            Continue with Google. If your account already owns a workspace,
+            Aotesys will open it. If not, you can create one next.
           </p>
         </div>
         <form className="auth-form" onSubmit={submit}>
-          <label>
-            <span>Workspace</span>
-            <input
-              value={workspaceInput}
-              placeholder="online2book"
-              onChange={(event) => setWorkspaceInput(event.target.value)}
-            />
-          </label>
           <div className="workspace-preview">
             <Sparkles size={18} />
-            <span>
-              {slugifyWorkspaceName(workspaceInput) || "workspace"}.{APP_DOMAIN}
-            </span>
+            <span>Google account controls workspace access</span>
           </div>
           {message && <p className="form-status">{message}</p>}
           <button

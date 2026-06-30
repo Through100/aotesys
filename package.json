@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.2",
+    "better-sqlite3": "^12.11.1",
     "express": "^5.2.1",
     "firebase": "^12.15.0",
     "firebase-admin": "^14.1.0",

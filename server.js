@@ -1,11 +1,11 @@
 import express from "express";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { cert, getApps, initializeApp as initializeAdminApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { createServer as createViteServer } from "vite";
 import {
   DEFAULT_IMAGE,
@@ -32,6 +32,7 @@ const WORKSPACE_SYNC_TOKEN_HEADER = "x-aotesys-workspace-token";
 loadEnvFile(path.join(__dirname, ".env"));
 
 const firebaseAdmin = initializeFirebaseAdmin();
+const appDatabase = initializeAppDatabase();
 
 const app = express();
 app.disable("x-powered-by");
@@ -45,27 +46,23 @@ if (isProduction) {
 
 app.get("/api/firebase-status", (request, response) => {
   response.json({
-    enabled: Boolean(firebaseAdmin.db),
-    projectId: firebaseAdmin.projectId
+    enabled: Boolean(firebaseAdmin.auth && appDatabase),
+    projectId: firebaseAdmin.projectId,
+    storage: "sqlite"
   });
 });
 
 app.get("/api/workspaces", async (request, response) => {
   try {
     const firebaseUser = await requireFirebaseUser(request);
-    const db = requireFirebaseDb();
-    const snapshot = await db
-      .collection("workspaces")
-      .where("ownerUid", "==", firebaseUser.uid)
-      .get();
+    const rows = appDatabase
+      .prepare(
+        "SELECT name, slug, created_at AS createdAt FROM workspaces WHERE owner_uid = ? ORDER BY created_at"
+      )
+      .all(firebaseUser.uid);
 
     response.json({
-      workspaces: snapshot.docs
-        .map((doc) => normalizeWorkspaceDoc(doc))
-        .sort(
-          (left, right) =>
-            Date.parse(left.createdAt || "") - Date.parse(right.createdAt || "")
-        )
+      workspaces: rows.map(normalizeWorkspaceRecord)
     });
   } catch (error) {
     sendFirebaseError(response, error);
@@ -75,37 +72,50 @@ app.get("/api/workspaces", async (request, response) => {
 app.post("/api/workspaces", async (request, response) => {
   try {
     const firebaseUser = await requireFirebaseUser(request);
-    const db = requireFirebaseDb();
     const workspace = sanitizeWorkspace(request.body?.workspace || request.body);
     const channels = normalizeChannelsPayload(request.body?.channels);
     const syncToken = getWorkspaceSyncToken(request);
-    const workspaceRef = db.collection("workspaces").doc(workspace.slug);
-    const workspaceSnapshot = await workspaceRef.get();
+    const workspaceRecord = getWorkspaceRecord(workspace.slug);
     const syncTokenHash = hashWorkspaceSyncToken(syncToken);
+    const now = new Date().toISOString();
 
-    assertWorkspaceOwner(workspaceSnapshot, firebaseUser.uid);
+    assertWorkspaceOwner(workspaceRecord, firebaseUser.uid);
 
-    await workspaceRef.set(
-      {
-        ...workspace,
-        ownerUid: firebaseUser.uid,
-        ownerEmail: firebaseUser.email || "",
-        ownerName: firebaseUser.name || "",
+    appDatabase
+      .prepare(
+        `
+          INSERT INTO workspaces (
+            slug,
+            name,
+            owner_uid,
+            owner_email,
+            owner_name,
+            sync_token_hash,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(slug) DO UPDATE SET
+            name = excluded.name,
+            owner_email = excluded.owner_email,
+            owner_name = excluded.owner_name,
+            sync_token_hash = excluded.sync_token_hash,
+            updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        workspace.slug,
+        workspace.name,
+        firebaseUser.uid,
+        firebaseUser.email || "",
+        firebaseUser.name || "",
         syncTokenHash,
-        updatedAt: FieldValue.serverTimestamp(),
-        createdAt: workspace.createdAt || FieldValue.serverTimestamp()
-      },
-      { merge: true }
-    );
+        workspaceRecord?.created_at || workspace.createdAt || now,
+        now
+      );
 
     if (channels.length > 0) {
-      await workspaceRef.collection("state").doc("channels").set(
-        {
-          channels,
-          updatedAt: FieldValue.serverTimestamp()
-        },
-        { merge: true }
-      );
+      upsertWorkspaceChannels(workspace.slug, channels, now);
     }
 
     response.status(201).json({ workspace });
@@ -117,21 +127,15 @@ app.post("/api/workspaces", async (request, response) => {
 app.get("/api/workspaces/:workspaceSlug/channels", async (request, response) => {
   try {
     const firebaseUser = await getOptionalFirebaseUser(request);
-    const db = requireFirebaseDb();
     const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
-    await requireWorkspaceAccess(db, workspaceSlug, {
+    requireWorkspaceAccess(workspaceSlug, {
       firebaseUser,
       syncToken: getOptionalWorkspaceSyncToken(request)
     });
-    const snapshot = await db
-      .collection("workspaces")
-      .doc(workspaceSlug)
-      .collection("state")
-      .doc("channels")
-      .get();
+    const state = getWorkspaceStateRecord(workspaceSlug);
 
     response.json({
-      channels: normalizeChannelsPayload(snapshot.data()?.channels)
+      channels: normalizeChannelsPayload(parseJsonArray(state?.channels_json))
     });
   } catch (error) {
     sendFirebaseError(response, error);
@@ -141,26 +145,14 @@ app.get("/api/workspaces/:workspaceSlug/channels", async (request, response) => 
 app.put("/api/workspaces/:workspaceSlug/channels", async (request, response) => {
   try {
     const firebaseUser = await getOptionalFirebaseUser(request);
-    const db = requireFirebaseDb();
     const workspaceSlug = sanitizeSlug(request.params.workspaceSlug);
     const channels = normalizeChannelsPayload(request.body?.channels);
-    await requireWorkspaceAccess(db, workspaceSlug, {
+    requireWorkspaceAccess(workspaceSlug, {
       firebaseUser,
       syncToken: getOptionalWorkspaceSyncToken(request)
     });
 
-    await db
-      .collection("workspaces")
-      .doc(workspaceSlug)
-      .collection("state")
-      .doc("channels")
-      .set(
-        {
-          channels,
-          updatedAt: FieldValue.serverTimestamp()
-        },
-        { merge: true }
-      );
+    upsertWorkspaceChannels(workspaceSlug, channels, new Date().toISOString());
 
     response.json({ ok: true });
   } catch (error) {
@@ -390,9 +382,56 @@ function initializeFirebaseAdmin() {
 
   return {
     auth: getAuth(app),
-    db: getFirestore(app),
     projectId: serviceAccount.project_id || ""
   };
+}
+
+function initializeAppDatabase() {
+  const databasePath = resolveAppDatabasePath();
+
+  mkdirSync(path.dirname(databasePath), { recursive: true });
+
+  const database = new Database(databasePath);
+  database.pragma("journal_mode = WAL");
+  database.pragma("foreign_keys = ON");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS workspaces (
+      slug TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      owner_uid TEXT NOT NULL,
+      owner_email TEXT NOT NULL DEFAULT '',
+      owner_name TEXT NOT NULL DEFAULT '',
+      sync_token_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workspaces_owner_created
+      ON workspaces(owner_uid, created_at);
+
+    CREATE TABLE IF NOT EXISTS workspace_state (
+      workspace_slug TEXT PRIMARY KEY,
+      channels_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(workspace_slug) REFERENCES workspaces(slug) ON DELETE CASCADE
+    );
+  `);
+
+  return database;
+}
+
+function resolveAppDatabasePath() {
+  if (process.env.AOTESYS_DB_PATH) {
+    return process.env.AOTESYS_DB_PATH;
+  }
+
+  const productionSharedDir = "/var/www/vhosts/aotesys.com/shared";
+
+  if (isProduction && existsSync(productionSharedDir)) {
+    return path.join(productionSharedDir, "aotesys.sqlite");
+  }
+
+  return path.join(__dirname, ".data", "aotesys.sqlite");
 }
 
 function getFirebaseServiceAccount() {
@@ -435,16 +474,6 @@ function normalizeServiceAccount(serviceAccount) {
   };
 }
 
-function requireFirebaseDb() {
-  if (!firebaseAdmin.db) {
-    const error = new Error("Firebase Admin is not configured.");
-    error.statusCode = 503;
-    throw error;
-  }
-
-  return firebaseAdmin.db;
-}
-
 async function requireFirebaseUser(request) {
   const user = await getOptionalFirebaseUser(request);
 
@@ -478,14 +507,51 @@ async function getOptionalFirebaseUser(request) {
   }
 }
 
-function normalizeWorkspaceDoc(doc) {
-  const data = doc.data() || {};
-
+function normalizeWorkspaceRecord(record) {
   return {
-    name: String(data.name || doc.id),
-    slug: String(data.slug || doc.id),
-    createdAt: toIsoString(data.createdAt) || new Date(0).toISOString()
+    name: String(record?.name || record?.slug || ""),
+    slug: String(record?.slug || ""),
+    createdAt: toIsoString(record?.createdAt || record?.created_at) || new Date(0).toISOString()
   };
+}
+
+function getWorkspaceRecord(workspaceSlug) {
+  return appDatabase
+    .prepare("SELECT * FROM workspaces WHERE slug = ?")
+    .get(workspaceSlug);
+}
+
+function getWorkspaceStateRecord(workspaceSlug) {
+  return appDatabase
+    .prepare("SELECT * FROM workspace_state WHERE workspace_slug = ?")
+    .get(workspaceSlug);
+}
+
+function upsertWorkspaceChannels(workspaceSlug, channels, updatedAt) {
+  appDatabase
+    .prepare(
+      `
+        INSERT INTO workspace_state (workspace_slug, channels_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(workspace_slug) DO UPDATE SET
+          channels_json = excluded.channels_json,
+          updated_at = excluded.updated_at
+      `
+    )
+    .run(workspaceSlug, JSON.stringify(channels), updatedAt);
+}
+
+function parseJsonArray(value) {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function sanitizeWorkspace(value) {
@@ -548,23 +614,21 @@ function hashWorkspaceSyncToken(syncToken) {
   return createHash("sha256").update(syncToken).digest("hex");
 }
 
-async function requireWorkspaceAccess(db, workspaceSlug, { firebaseUser, syncToken }) {
-  const workspaceSnapshot = await db.collection("workspaces").doc(workspaceSlug).get();
+function requireWorkspaceAccess(workspaceSlug, { firebaseUser, syncToken }) {
+  const workspaceRecord = getWorkspaceRecord(workspaceSlug);
 
-  if (!workspaceSnapshot.exists) {
+  if (!workspaceRecord) {
     const error = new Error("Workspace not found.");
     error.statusCode = 404;
     throw error;
   }
 
-  const data = workspaceSnapshot.data() || {};
-
-  if (firebaseUser?.uid && data.ownerUid === firebaseUser.uid) {
+  if (firebaseUser?.uid && workspaceRecord.owner_uid === firebaseUser.uid) {
     return;
   }
 
   if (syncToken) {
-    assertWorkspaceTokenMatch(workspaceSnapshot, hashWorkspaceSyncToken(syncToken));
+    assertWorkspaceTokenMatch(workspaceRecord, hashWorkspaceSyncToken(syncToken));
     return;
   }
 
@@ -573,20 +637,20 @@ async function requireWorkspaceAccess(db, workspaceSlug, { firebaseUser, syncTok
   throw error;
 }
 
-function assertWorkspaceOwner(workspaceSnapshot, ownerUid) {
-  const savedOwnerUid = workspaceSnapshot.data()?.ownerUid;
+function assertWorkspaceOwner(workspaceRecord, ownerUid) {
+  const savedOwnerUid = workspaceRecord?.owner_uid;
 
-  if (workspaceSnapshot.exists && savedOwnerUid && savedOwnerUid !== ownerUid) {
+  if (workspaceRecord && savedOwnerUid && savedOwnerUid !== ownerUid) {
     const error = new Error("Workspace belongs to another Google account.");
     error.statusCode = 403;
     throw error;
   }
 }
 
-function assertWorkspaceTokenMatch(workspaceSnapshot, syncTokenHash) {
-  const savedTokenHash = workspaceSnapshot.data()?.syncTokenHash;
+function assertWorkspaceTokenMatch(workspaceRecord, syncTokenHash) {
+  const savedTokenHash = workspaceRecord?.sync_token_hash;
 
-  if (workspaceSnapshot.exists && savedTokenHash && savedTokenHash !== syncTokenHash) {
+  if (workspaceRecord && savedTokenHash && savedTokenHash !== syncTokenHash) {
     const error = new Error("Workspace sync token is invalid.");
     error.statusCode = 403;
     throw error;

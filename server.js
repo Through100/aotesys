@@ -1196,6 +1196,18 @@ async function createOllamaReply(payload) {
 
   const visitorName = String(payload?.visitorName || "").trim();
   const detectedName = detectVisitorName(message);
+  const prompt = String(payload?.prompt || "").trim();
+  const promptUpdatedAt = String(payload?.promptUpdatedAt || "").trim();
+  const autoKnowledgePrompt = payload?.autoKnowledgeEnabled
+    ? String(payload?.autoKnowledgePrompt || "").trim()
+    : "";
+  const autoKnowledgeUpdatedAt = payload?.autoKnowledgeEnabled
+    ? String(payload?.autoKnowledgeUpdatedAt || "").trim()
+    : "";
+  const history = Array.isArray(payload?.history) ? payload.history : [];
+  const hasBusinessContext =
+    hasBusinessTerm(message) ||
+    isBusinessFollowUp(message, history, prompt, autoKnowledgePrompt);
 
   if (hasContactDetail(message)) {
     return {
@@ -1206,7 +1218,7 @@ async function createOllamaReply(payload) {
     };
   }
 
-  if (!hasBusinessTerm(message)) {
+  if (!hasBusinessContext) {
     if (detectedName) {
       return {
         reply: `Nice to meet you, ${detectedName}. What would you like help with today?`,
@@ -1233,14 +1245,6 @@ async function createOllamaReply(payload) {
     };
   }
 
-  const prompt = String(payload?.prompt || "").trim();
-  const promptUpdatedAt = String(payload?.promptUpdatedAt || "").trim();
-  const autoKnowledgePrompt = payload?.autoKnowledgeEnabled
-    ? String(payload?.autoKnowledgePrompt || "").trim()
-    : "";
-  const autoKnowledgeUpdatedAt = payload?.autoKnowledgeEnabled
-    ? String(payload?.autoKnowledgeUpdatedAt || "").trim()
-    : "";
   const promptAge = getPromptAge(promptUpdatedAt);
   const messages = buildMessages(payload, message, {
     prompt,
@@ -1396,9 +1400,11 @@ Accuracy rules:
 - Treat the approved channel prompt and enabled Auto Knowledges Learning prompt above as the only sources of business truth.
 - Do not invent prices, shipping details, availability, product/service features, policies, locations, timelines, guarantees, or contact details.
 - Answer a business question only when the answer is explicitly provided in the approved channel prompt, enabled Auto Knowledges Learning prompt, or already stated by the visitor in this conversation.
+- You may make simple logical recommendations from approved facts and the visitor's stated needs. For example, if an approved Free plan allows 10 units and the visitor says they have 20 units, recommend the approved plan that supports more than 10 units.
 - If the answer is not explicitly provided, use this exact reply: "${MANAGER_HANDOFF_REPLY}"
 - If the visitor provides contact details, acknowledge them and say the Sale Manager can follow up.
 - If the visitor asks something unrelated to this business, use this exact reply: "${OFF_TOPIC_REPLY}"
+- Treat short follow-up details as business-related when they clearly refer to the recent business conversation, such as "I have 20 units" after discussing pricing plans.
 - If the visitor has not provided their name yet, ask for their name before deeper sales questions.
 - When you answer using an approved fact and the prompt is stale, include that the information was last updated ${promptAge.label}.
 - Set supportedByPrompt to true only when the reply is supported by one of the approved sources.
@@ -1520,6 +1526,9 @@ function hasBusinessTerm(message) {
   const lowerMessage = message.toLowerCase();
 
   return [
+    "accommodation",
+    "booking",
+    "bookings",
     "price",
     "cost",
     "fee",
@@ -1535,6 +1544,27 @@ function hasBusinessTerm(message) {
     "feature",
     "package",
     "plan",
+    "property",
+    "properties",
+    "holiday",
+    "holiday park",
+    "unit",
+    "units",
+    "room",
+    "rooms",
+    "site",
+    "sites",
+    "cabin",
+    "cabins",
+    "guest",
+    "guests",
+    "stripe",
+    "domain",
+    "website",
+    "seo",
+    "commission",
+    "commissions",
+    "ota",
     "subscription",
     "setup",
     "support",
@@ -1551,6 +1581,40 @@ function hasBusinessTerm(message) {
     "order",
     "buy"
   ].some((term) => lowerMessage.includes(term));
+}
+
+function isBusinessFollowUp(message, history, prompt, autoKnowledgePrompt) {
+  const lowerMessage = message.toLowerCase();
+  const recentHistory = (Array.isArray(history) ? history : [])
+    .slice(-6)
+    .map((item) => String(item?.text || ""))
+    .join(" ");
+  const context = `${recentHistory}\n${prompt || ""}\n${autoKnowledgePrompt || ""}`;
+  const lowerContext = context.toLowerCase();
+
+  if (!hasBusinessTerm(lowerContext)) {
+    return false;
+  }
+
+  if (hasBusinessTerm(message)) {
+    return true;
+  }
+
+  if (/\b\d+\s+(?:unit|units|room|rooms|site|sites|cabins?|properties|parks?)\b/i.test(message)) {
+    return true;
+  }
+
+  if (
+    /^(yes|no|ok|okay|sure|also|and|but|so|then|what about|how about|can i|do i|does it|is it|would it|should i|i have|we have|my|our|this|that|it)\b/i.test(
+      lowerMessage
+    )
+  ) {
+    return /plan|price|pricing|feature|booking|unit|property|support|website|domain|seo|stripe|commission/i.test(
+      lowerContext
+    );
+  }
+
+  return false;
 }
 
 function hasContactDetail(message) {

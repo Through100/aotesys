@@ -30,7 +30,7 @@ import {
   UserRound,
   Workflow
 } from "lucide-react";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AUTHOR_EMAIL,
   AUTHOR_NAME,
@@ -59,9 +59,11 @@ const WORKSPACES_STORAGE_KEY = "aotesys-workspaces";
 const CURRENT_WORKSPACE_STORAGE_KEY = "aotesys-current-workspace";
 const WORKSPACE_SYNC_TOKEN_STORAGE_PREFIX = "aotesys-sync-token";
 const UNSURE_MANAGER_REPLY =
-  "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
+  "I do not have an approved answer for that yet. Can I get your email address or best contact detail so the Sale Manager can reply with the right answer? You can still ask me anything else while I check.";
 const OFF_TOPIC_REPLY =
   "I can only help with questions related to this business. If you have a business question, please send it here.";
+const OWNER_LIVE_REFRESH_MS = 3000;
+const PUBLIC_CHAT_REFRESH_MS = 3000;
 const MARKETING_ROUTE_NAMES = new Set([
   "features",
   "resources",
@@ -278,6 +280,77 @@ function normalizeChannels(channels) {
   }));
 }
 
+function mergeChannelsForLiveUpdates(currentChannels, incomingChannels) {
+  const currentById = new Map(currentChannels.map((channel) => [channel.id, channel]));
+  const incomingById = new Map(
+    normalizeChannels(incomingChannels).map((channel) => [channel.id, channel])
+  );
+  const orderedIds = [
+    ...currentChannels.map((channel) => channel.id),
+    ...incomingChannels.map((channel) => channel.id)
+  ].filter((id, index, ids) => id && ids.indexOf(id) === index);
+
+  return orderedIds
+    .map((id) => {
+      const currentChannel = currentById.get(id);
+      const incomingChannel = incomingById.get(id);
+
+      if (!currentChannel) {
+        return incomingChannel;
+      }
+
+      if (!incomingChannel) {
+        return currentChannel;
+      }
+
+      return {
+        ...currentChannel,
+        conversations: mergeConversationsForLiveUpdates(
+          currentChannel.conversations,
+          incomingChannel.conversations
+        )
+      };
+    })
+    .filter(Boolean);
+}
+
+function mergeConversationsForLiveUpdates(currentConversations, incomingConversations) {
+  const currentById = new Map(
+    currentConversations.map((conversation) => [conversation.id, conversation])
+  );
+  const incomingById = new Map(
+    incomingConversations.map((conversation) => [conversation.id, conversation])
+  );
+  const orderedIds = [
+    ...incomingConversations.map((conversation) => conversation.id),
+    ...currentConversations.map((conversation) => conversation.id)
+  ].filter((id, index, ids) => id && ids.indexOf(id) === index);
+
+  return orderedIds
+    .map((id) => {
+      const currentConversation = currentById.get(id);
+      const incomingConversation = incomingById.get(id);
+
+      if (!currentConversation) {
+        return incomingConversation;
+      }
+
+      if (!incomingConversation) {
+        return currentConversation;
+      }
+
+      const incomingTime = getConversationTime(incomingConversation);
+      const currentTime = getConversationTime(currentConversation);
+      const incomingMessageCount = incomingConversation.messages?.length || 0;
+      const currentMessageCount = currentConversation.messages?.length || 0;
+
+      return incomingTime > currentTime || incomingMessageCount > currentMessageCount
+        ? incomingConversation
+        : currentConversation;
+    })
+    .filter(Boolean);
+}
+
 function ensureOwnerSetupChannels(channels) {
   return normalizeChannels(channels).map((channel) => {
     const hasSetupConversation = channel.conversations.some(
@@ -430,6 +503,24 @@ function getPendingKnowledgeConversations(channel) {
   return (channel?.conversations || []).filter(isConversationPendingKnowledge);
 }
 
+function getChannelOwnerAlertCount(channel) {
+  return (channel?.conversations || []).filter(isConversationOwnerAlert).length;
+}
+
+function isConversationOwnerAlert(conversation) {
+  if (conversation?.archived) {
+    return false;
+  }
+
+  const status = String(conversation?.status || "").toLowerCase();
+
+  if (conversation?.receptionistLearning) {
+    return !["learned", "setup complete", "archived"].includes(status);
+  }
+
+  return status.includes("needs manager") || status.includes("receptionist checking");
+}
+
 function getKnowledgeAuditStats(channel) {
   const conversations = (channel?.conversations || []).filter(
     hasKnowledgeAuditContent
@@ -512,12 +603,24 @@ function getVisitorSessionId(workspaceSlug, channelId) {
   return nextId;
 }
 
-function buildReceptionistCustomerReply(ownerAnswer) {
-  return `Thanks for waiting. I checked that for you: ${ownerAnswer.trim()}`;
+function buildReceptionistCustomerReply(ownerAnswer, customerQuestions = []) {
+  const questions = normalizeQuestionList(customerQuestions);
+  const intro =
+    questions.length > 1
+      ? "Thanks for waiting. I checked those questions for you:"
+      : "Thanks for waiting. I checked that for you:";
+
+  return `${intro}\n\n${ownerAnswer.trim()}\n\nIf you need anything else, you can ask me here.`;
 }
 
-function buildReceptionistLearnedFact(customerQuestion, ownerAnswer) {
-  return `Customer asked: ${customerQuestion.trim()}\nOwner confirmed: ${ownerAnswer.trim()}`;
+function buildReceptionistLearnedFact(customerQuestions, ownerAnswer) {
+  const questions = normalizeQuestionList(customerQuestions);
+  const questionText =
+    questions.length > 1
+      ? questions.map((question) => `- ${question}`).join("\n")
+      : questions[0] || "Customer asked for an owner-confirmed answer.";
+
+  return `Customer asked:\n${questionText}\nOwner confirmed:\n${ownerAnswer.trim()}`;
 }
 
 function appendLearnedKnowledge(existingKnowledge, learnedFact) {
@@ -529,6 +632,34 @@ function appendLearnedKnowledge(existingKnowledge, learnedFact) {
   }
 
   return [cleanExisting, cleanFact].filter(Boolean).join("\n\n");
+}
+
+function normalizeQuestionList(value) {
+  const questions = Array.isArray(value) ? value : [value];
+  const seen = new Set();
+
+  return questions
+    .map((question) => String(question || "").trim())
+    .filter(Boolean)
+    .filter((question) => {
+      const key = question.toLowerCase();
+
+      if (seen.has(key)) {
+        return false;
+      }
+
+      seen.add(key);
+      return true;
+    });
+}
+
+function getLearningQuestions(learningRequest) {
+  return normalizeQuestionList([
+    ...(Array.isArray(learningRequest?.openQuestions)
+      ? learningRequest.openQuestions
+      : []),
+    learningRequest?.customerQuestion
+  ]);
 }
 
 function mentionsAny(value, terms) {
@@ -574,7 +705,22 @@ function getNextOwnerSetupTurn(learningRequest, ownerAnswer) {
   const setupStep = Number(learningRequest?.setupStep) || 0;
   const followUpCount = Number(learningRequest?.followUpCount) || 0;
   const currentStep = OWNER_SETUP_STEPS[setupStep] || OWNER_SETUP_STEPS[0];
+  const activeQuestion = learningRequest?.customerQuestion || currentStep.question;
   const answerLooksUseful = isOwnerSetupAnswerUseful(ownerAnswer);
+
+  if (isOwnerClarificationQuestion(ownerAnswer)) {
+    return {
+      nextLearning: {
+        ...learningRequest,
+        setupStep,
+        followUpCount,
+        customerQuestion: activeQuestion
+      },
+      text: buildOwnerSetupClarification(currentStep, activeQuestion),
+      status: "Clarifying",
+      shouldLearn: false
+    };
+  }
 
   if (!answerLooksUseful) {
     return {
@@ -585,7 +731,8 @@ function getNextOwnerSetupTurn(learningRequest, ownerAnswer) {
         customerQuestion: currentStep.missingPrompt
       },
       text: currentStep.missingPrompt,
-      status: "Needs more detail"
+      status: "Needs more detail",
+      shouldLearn: false
     };
   }
 
@@ -600,7 +747,8 @@ function getNextOwnerSetupTurn(learningRequest, ownerAnswer) {
         customerQuestion: followUpQuestion
       },
       text: `Good, I saved that.\n\n${followUpQuestion}`,
-      status: "Learning"
+      status: "Learning",
+      shouldLearn: true
     };
   }
 
@@ -616,7 +764,8 @@ function getNextOwnerSetupTurn(learningRequest, ownerAnswer) {
         customerQuestion: nextQuestion
       },
       text: `Great, I have enough for that part.\n\n${nextQuestion}`,
-      status: "Learning"
+      status: "Learning",
+      shouldLearn: true
     };
   }
 
@@ -630,8 +779,38 @@ function getNextOwnerSetupTurn(learningRequest, ownerAnswer) {
     },
     text:
       "Great, I have enough starter knowledge to act more like your receptionist. You can still paste more FAQ, product notes, or corrections here any time.",
-    status: "Setup complete"
+    status: "Setup complete",
+    shouldLearn: true
   };
+}
+
+function isOwnerClarificationQuestion(ownerAnswer) {
+  const answer = String(ownerAnswer || "").trim().toLowerCase();
+
+  if (!answer.endsWith("?")) {
+    return false;
+  }
+
+  return /^(do you mean|what do you mean|can you explain|could you explain|meaning|you mean|is this|is that|should i|are you asking|in case|for what)/i.test(
+    answer
+  );
+}
+
+function buildOwnerSetupClarification(currentStep, activeQuestion) {
+  const explanations = {
+    "business-overview":
+      "I mean the plain customer-facing description I should use to understand the business before I answer visitors.",
+    "products-services":
+      "I mean the actual things customers can ask about, including names, plans, prices, links, or limits that are safe for me to mention.",
+    "booking-buying":
+      "Yes. This covers both normal next steps and cases where I cannot fully answer. Tell me what I should collect or suggest before handing the visitor to you.",
+    policies:
+      "I mean the rules I should respect before answering, such as opening hours, refunds, cancellation rules, service area, delivery, payment, or anything I should never promise.",
+    "faq-dump":
+      "I mean any existing website text, sitemap links, FAQ, Q&A, product notes, or old answers that I can treat as owner-approved knowledge."
+  };
+
+  return `${explanations[currentStep.key] || "I mean the owner-approved detail I need before I can answer customers safely."}\n\n${activeQuestion}`;
 }
 
 function getOwnerSetupLearningState(conversation) {
@@ -1282,6 +1461,52 @@ export default function App() {
   }, [workspaces]);
 
   useEffect(() => {
+    if (
+      route.name === "public-chat" ||
+      !isAuthenticated ||
+      !activeWorkspace ||
+      (!firebaseUser && !getStoredWorkspaceSyncToken(activeWorkspace.slug))
+    ) {
+      return undefined;
+    }
+
+    let isCancelled = false;
+
+    const refreshOwnerChannels = async () => {
+      try {
+        const cloudChannels = await fetchCloudChannels(
+          activeWorkspace.slug,
+          firebaseUser
+        );
+
+        if (!isCancelled && cloudChannels.length > 0) {
+          setChannels((current) =>
+            mergeChannelsForLiveUpdates(current, cloudChannels)
+          );
+        }
+      } catch {
+        // Keep the current local view if the live refresh misses once.
+      }
+    };
+
+    void refreshOwnerChannels();
+    const interval = window.setInterval(
+      refreshOwnerChannels,
+      OWNER_LIVE_REFRESH_MS
+    );
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [
+    activeWorkspace?.slug,
+    firebaseUser,
+    isAuthenticated,
+    route.name
+  ]);
+
+  useEffect(() => {
     if (activeWorkspace) {
       window.localStorage.setItem(
         CURRENT_WORKSPACE_STORAGE_KEY,
@@ -1657,22 +1882,24 @@ export default function App() {
 
         if (learningRequest?.type === "owner-setup") {
           const now = getNowIso();
-          const learnedFact = `Owner-approved setup knowledge or Q&A:\n${ownerAnswer}`;
-          const nextKnowledge = appendLearnedKnowledge(
-            channel.autoKnowledgePrompt,
-            learnedFact
-          );
           const setupTurn = getNextOwnerSetupTurn(
             getOwnerSetupLearningState(selectedConversation),
             ownerAnswer
           );
+          const shouldLearnAnswer = setupTurn.shouldLearn !== false;
+          const learnedFact = `Owner-approved setup knowledge or Q&A:\n${ownerAnswer}`;
+          const nextKnowledge = shouldLearnAnswer
+            ? appendLearnedKnowledge(channel.autoKnowledgePrompt, learnedFact)
+            : channel.autoKnowledgePrompt;
 
           return {
             ...channel,
             autoKnowledgeEnabled: true,
             receptionistLearningEnabled: true,
             autoKnowledgePrompt: nextKnowledge,
-            autoKnowledgeUpdatedAt: now,
+            autoKnowledgeUpdatedAt: shouldLearnAnswer
+              ? now
+              : channel.autoKnowledgeUpdatedAt,
             conversations: channel.conversations.map((conversation) =>
               conversation.id === selectedConversation.id
                 ? {
@@ -1704,9 +1931,13 @@ export default function App() {
 
         if (learningRequest?.customerConversationId) {
           const now = getNowIso();
-          const customerReply = buildReceptionistCustomerReply(ownerAnswer);
+          const learningQuestions = getLearningQuestions(learningRequest);
+          const customerReply = buildReceptionistCustomerReply(
+            ownerAnswer,
+            learningQuestions
+          );
           const learnedFact = buildReceptionistLearnedFact(
-            learningRequest.customerQuestion,
+            learningQuestions,
             ownerAnswer
           );
           const nextKnowledge = appendLearnedKnowledge(
@@ -1884,6 +2115,86 @@ export default function App() {
     );
   };
 
+  const appendVisitorMessage = (channelId, conversationId, text) => {
+    const messageText = text.trim();
+
+    setChannels((current) =>
+      current.map((channel) => {
+        if (channel.id !== channelId) {
+          return channel;
+        }
+
+        let didUpdateConversation = false;
+        const conversations = channel.conversations.map((conversation) => {
+          if (conversation.id !== conversationId) {
+            return conversation;
+          }
+
+          didUpdateConversation = true;
+          const detectedName = detectVisitorName(messageText);
+          const visitorName =
+            conversation.visitorName === "Visitor" && detectedName
+              ? detectedName
+              : conversation.visitorName;
+
+          return {
+            ...conversation,
+            visitorName,
+            status: "Bot typing",
+            lastSeen: "Just now",
+            lastActivityAt: getNowIso(),
+            autoKnowledgeAuditedAt: "",
+            archived: false,
+            messages: [
+              ...conversation.messages,
+              {
+                id: conversation.messages.length + 1,
+                role: "visitor",
+                text: messageText
+              }
+            ]
+          };
+        });
+
+        if (didUpdateConversation) {
+          return {
+            ...channel,
+            conversations
+          };
+        }
+
+        return {
+          ...channel,
+          conversations: [
+            ...channel.conversations,
+            {
+              id: conversationId,
+              visitorName: detectVisitorName(messageText) || "Visitor",
+              status: "Bot typing",
+              lastSeen: "Just now",
+              lastActivityAt: getNowIso(),
+              autoKnowledgeAuditedAt: "",
+              archived: false,
+              messages: [
+                {
+                  id: 1,
+                  role: "bot",
+                  text:
+                    "Hi, I am Sale Assist. I can help answer questions here. Before we start, what should I call you?"
+                },
+                {
+                  id: 2,
+                  role: "visitor",
+                  text: messageText
+                }
+              ]
+            }
+          ]
+        };
+      })
+    );
+  };
+
   const appendBotMessage = (channelId, conversationId, text, status) => {
     setChannels((current) =>
       current.map((channel) => {
@@ -1927,21 +2238,34 @@ export default function App() {
     }
 
     if (route.name === "public-chat" && publicWorkspaceSlug) {
-      const result = await sendPublicChatMessage(
-        publicWorkspaceSlug,
-        channelId,
-        conversationId,
-        messageText
-      );
+      appendVisitorMessage(channelId, conversationId, messageText);
 
-      setActiveWorkspace(result.workspace);
-      setChannels((current) => {
-        const withoutChannel = current.filter(
-          (channel) => channel.id !== result.channel.id
+      try {
+        const result = await sendPublicChatMessage(
+          publicWorkspaceSlug,
+          channelId,
+          conversationId,
+          messageText
         );
 
-        return [...withoutChannel, result.channel];
-      });
+        setActiveWorkspace(result.workspace);
+        setChannels((current) => {
+          const withoutChannel = current.filter(
+            (channel) => channel.id !== result.channel.id
+          );
+
+          return [...withoutChannel, result.channel];
+        });
+      } catch (error) {
+        appendBotMessage(
+          channelId,
+          conversationId,
+          "I could not finish that reply. Please share your email or best contact detail and the Sale Manager can follow up.",
+          "Needs manager"
+        );
+        throw error;
+      }
+
       return;
     }
 
@@ -2176,20 +2500,27 @@ export default function App() {
 
             {isSidebarOpen && activeTab === "conversations" && (
               <div className="sidebar-channel-list">
-                {channels.map((channel) => (
-                  <button
-                    key={channel.id}
-                    className={
-                      channel.id === selectedChannelId
-                        ? "sidebar-channel-button active"
-                        : "sidebar-channel-button"
-                    }
-                    onClick={() => selectChannel(channel.id)}
-                  >
-                    <MessageCircle size={16} />
-                    <span>{channel.name}</span>
-                  </button>
-                ))}
+                {channels.map((channel) => {
+                  const alertCount = getChannelOwnerAlertCount(channel);
+
+                  return (
+                    <button
+                      key={channel.id}
+                      className={
+                        channel.id === selectedChannelId
+                          ? "sidebar-channel-button active"
+                          : "sidebar-channel-button"
+                      }
+                      onClick={() => selectChannel(channel.id)}
+                    >
+                      <MessageCircle size={16} />
+                      <span>{channel.name}</span>
+                      {alertCount > 0 && (
+                        <span className="alert-badge">{alertCount}</span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -3359,6 +3690,207 @@ function LoginPage({ isAuthReady, onNavigate, onLogin }) {
   );
 }
 
+function useLatestMessageScroll(dependencies) {
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+
+    if (!list) {
+      return;
+    }
+
+    list.scrollTop = list.scrollHeight;
+  }, dependencies);
+
+  return listRef;
+}
+
+function AutoGrowTextarea({
+  value,
+  onChange,
+  onSubmit,
+  className = "",
+  ...props
+}) {
+  const textareaRef = useRef(null);
+
+  const resizeTextarea = () => {
+    const textarea = textareaRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
+  };
+
+  useEffect(() => {
+    resizeTextarea();
+  }, [value]);
+
+  return (
+    <textarea
+      {...props}
+      ref={textareaRef}
+      className={["auto-grow-textarea", className].filter(Boolean).join(" ")}
+      rows={1}
+      value={value}
+      onChange={(event) => {
+        onChange(event);
+        window.requestAnimationFrame(resizeTextarea);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          onSubmit?.();
+        }
+      }}
+    />
+  );
+}
+
+function MessageText({ text }) {
+  const blocks = getMessageBlocks(text);
+
+  return (
+    <div className="message-content">
+      {blocks.map((block, index) =>
+        block.type === "list" ? (
+          <ul key={`list-${index}`}>
+            {block.items.map((item, itemIndex) => (
+              <li key={`item-${index}-${itemIndex}`}>
+                {renderInlineMarkdown(item, `${index}-${itemIndex}`)}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p key={`paragraph-${index}`}>
+            {block.lines.map((line, lineIndex) => (
+              <React.Fragment key={`line-${index}-${lineIndex}`}>
+                {lineIndex > 0 && <br />}
+                {renderInlineMarkdown(line, `${index}-${lineIndex}`)}
+              </React.Fragment>
+            ))}
+          </p>
+        )
+      )}
+    </div>
+  );
+}
+
+function getMessageBlocks(text) {
+  const displayText = formatMessageTextForDisplay(text);
+
+  return displayText
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => {
+      const lines = block
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const bulletItems = lines
+        .map((line) => line.match(/^(?:[-*•]|\d+[.)])\s+(.+)$/))
+        .filter(Boolean)
+        .map((match) => match[1]);
+
+      if (bulletItems.length === lines.length && bulletItems.length > 0) {
+        return {
+          type: "list",
+          items: bulletItems
+        };
+      }
+
+      return {
+        type: "paragraph",
+        lines
+      };
+    });
+}
+
+function formatMessageTextForDisplay(text) {
+  return String(text || "")
+    .trim()
+    .replace(/\s+(?=\*\*[^*\n]{2,80}:\*\*)/g, "\n\n")
+    .replace(/\s+-\s+(?=\*\*)/g, "\n- ")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+function renderInlineMarkdown(text, keyPrefix) {
+  const parts = [];
+  const pattern =
+    /(\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<]+|\*\*([^*]+)\*\*)/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+
+    if (match[2] && match[3]) {
+      parts.push(
+        <a
+          key={`${keyPrefix}-link-${match.index}`}
+          href={match[3]}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {match[2]}
+        </a>
+      );
+    } else if (match[4]) {
+      parts.push(
+        <strong key={`${keyPrefix}-bold-${match.index}`}>{match[4]}</strong>
+      );
+    } else {
+      const { url, trailing } = splitTrailingUrlPunctuation(match[0]);
+
+      parts.push(
+        <a
+          key={`${keyPrefix}-url-${match.index}`}
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {url}
+        </a>
+      );
+
+      if (trailing) {
+        parts.push(trailing);
+      }
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : text;
+}
+
+function splitTrailingUrlPunctuation(url) {
+  const match = String(url || "").match(/^(.+?)([.,!?;:)]*)$/);
+
+  return {
+    url: match?.[1] || url,
+    trailing: match?.[2] || ""
+  };
+}
+
+function conversationMessageCount(channel, conversationId) {
+  return (
+    channel?.conversations.find((conversation) => conversation.id === conversationId)
+      ?.messages.length || 0
+  );
+}
+
 function PublicChatPage({
   channel,
   channelId,
@@ -3374,6 +3906,10 @@ function PublicChatPage({
   );
   const [draftMessage, setDraftMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const messageListRef = useLatestMessageScroll([
+    conversationMessageCount(channel, visitorConversationId),
+    isSending
+  ]);
 
   useEffect(() => {
     if (channel) {
@@ -3388,7 +3924,7 @@ function PublicChatPage({
 
     const interval = window.setInterval(() => {
       void onRefreshConversation(channelId, visitorConversationId).catch(() => {});
-    }, 5000);
+    }, PUBLIC_CHAT_REFRESH_MS);
 
     return () => window.clearInterval(interval);
   }, [
@@ -3459,28 +3995,32 @@ function PublicChatPage({
               <p className="eyebrow">{workspace?.name || channel.name}</p>
               <h2>Sale Support</h2>
             </div>
-            <span className="status-pill">Bot active</span>
+            <span className="status-pill">
+              {isSending ? "Bot typing" : "Bot active"}
+            </span>
           </div>
 
-          <div className="message-list">
+          <div className="message-list" ref={messageListRef}>
             {(conversation?.messages ?? []).map((message) => (
               <div key={message.id} className={`message ${message.role}`}>
                 <span>{message.role === "bot" ? "Bot" : "You"}</span>
-                <p>{message.text}</p>
+                <MessageText text={message.text} />
               </div>
             ))}
+            {isSending && (
+              <div className="message bot typing-message">
+                <span>Bot</span>
+                <MessageText text="Typing..." />
+              </div>
+            )}
           </div>
 
           <div className="reply-box">
-            <input
+            <AutoGrowTextarea
               value={draftMessage}
               placeholder="Type your message..."
               onChange={(event) => setDraftMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  sendMessage();
-                }
-              }}
+              onSubmit={sendMessage}
             />
             <button
               className="primary-icon-button"
@@ -3573,6 +4113,12 @@ function ConversationPanel({
     selectedChannel?.autoKnowledgeEnabled &&
       selectedChannel?.receptionistLearningEnabled
   );
+  const selectedMessageCount = selectedConversation?.messages.length || 0;
+  const ownerAlertCount = getChannelOwnerAlertCount(selectedChannel);
+  const messageListRef = useLatestMessageScroll([
+    selectedConversation?.id,
+    selectedMessageCount
+  ]);
   const knowledgeAuditStats = useMemo(
     () => getKnowledgeAuditStats(selectedChannel),
     [selectedChannel]
@@ -3744,6 +4290,9 @@ function ConversationPanel({
             <div className="owner-learning-frame">
               <div className="panel-heading">
                 <h2>Owner / Receptionist setup</h2>
+                {ownerAlertCount > 0 && (
+                  <span className="alert-badge large">{ownerAlertCount}</span>
+                )}
               </div>
               <div className="visitor-list owner-learning-list">
                 {ownerConversations.length === 0 && (
@@ -3771,7 +4320,12 @@ function ConversationPanel({
                       <strong>{conversation.visitorName}</strong>
                       <span>{conversation.lastSeen}</span>
                     </div>
-                    <small>{conversation.status}</small>
+                    <small>
+                      {conversation.status}
+                      {isConversationOwnerAlert(conversation) && (
+                        <span className="inline-alert-dot" />
+                      )}
+                    </small>
                   </button>
                 ))}
               </div>
@@ -3803,7 +4357,12 @@ function ConversationPanel({
                   <strong>{conversation.visitorName}</strong>
                   <span>{conversation.lastSeen}</span>
                 </div>
-                <small>{conversation.status}</small>
+                <small>
+                  {conversation.status}
+                  {isConversationOwnerAlert(conversation) && (
+                    <span className="inline-alert-dot" />
+                  )}
+                </small>
               </button>
             ))}
           </div>
@@ -3837,20 +4396,20 @@ function ConversationPanel({
             </div>
           </div>
 
-          <div className="message-list">
+          <div className="message-list" ref={messageListRef}>
             {!selectedConversation && (
               <div className="empty-panel">Archived conversations are hidden.</div>
             )}
             {selectedConversation?.messages.map((message) => (
               <div key={message.id} className={`message ${message.role}`}>
                 <span>{message.role === "bot" ? "Bot" : message.role === "owner" ? "Owner" : "Visitor"}</span>
-                <p>{message.text}</p>
+                <MessageText text={message.text} />
               </div>
             ))}
           </div>
 
           <div className="reply-box">
-            <input
+            <AutoGrowTextarea
               value={draftReply}
               placeholder={
                 selectedConversation?.receptionistLearning
@@ -3858,11 +4417,7 @@ function ConversationPanel({
                   : "Join the conversation..."
               }
               onChange={(event) => onDraftReplyChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  onSendOwnerReply();
-                }
-              }}
+              onSubmit={onSendOwnerReply}
             />
             <button
               className="primary-icon-button"

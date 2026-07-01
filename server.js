@@ -24,7 +24,7 @@ const isProduction =
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 5173);
 const MANAGER_HANDOFF_REPLY =
-  "I'm unsure at the moment. Can I get your email address or preferred contact detail so the Sale Manager can answer you back?";
+  "I do not have an approved answer for that yet. Can I get your email address or best contact detail so the Sale Manager can reply with the right answer? You can still ask me anything else while I check.";
 const OFF_TOPIC_REPLY =
   "I can only help with questions related to this business. If you have a business question, please send it here.";
 const WORKSPACE_SYNC_TOKEN_HEADER = "x-aotesys-workspace-token";
@@ -220,10 +220,9 @@ app.post(
       };
 
       const botReply = await getPublicBotReply(channel, conversation, message);
-      const botMessageText =
-        botReply.needsManager && channel.receptionistLearningEnabled
-          ? "Thanks, let me check that properly with the business owner so I can give you the right answer."
-          : botReply.reply;
+      const botMessageText = botReply.needsManager
+        ? MANAGER_HANDOFF_REPLY
+        : botReply.reply;
       const conversationStatus =
         botReply.needsManager && channel.receptionistLearningEnabled
           ? "Receptionist checking"
@@ -925,11 +924,35 @@ function createReceptionistLearningConversation({
     (conversation) => conversation.id === id
   );
   const existingMessages = existingConversation?.messages || [];
+  const existingQuestions = normalizeQuestionList([
+    ...(Array.isArray(existingConversation?.receptionistLearning?.openQuestions)
+      ? existingConversation.receptionistLearning.openQuestions
+      : []),
+    existingConversation?.receptionistLearning?.customerQuestion
+  ]);
+  const openQuestions = normalizeQuestionList([
+    ...existingQuestions,
+    customerMessage
+  ]);
+  const alreadyAsked = existingQuestions.some(
+    (question) => question.toLowerCase() === customerMessage.trim().toLowerCase()
+  );
   const customerName = customerConversation.visitorName || "the visitor";
   const existingKnowledge = String(channel.autoKnowledgePrompt || "").trim();
   const possibleConflict = existingKnowledge
     ? "\n\nIf this differs from existing learned knowledge, please say what changed and which answer should be used going forward."
     : "";
+  const followUpMessage =
+    existingMessages.length > 0 && !alreadyAsked
+      ? {
+          id: existingMessages.length + 1,
+          role: "bot",
+          text: [
+            `Another customer question from ${customerName}: "${customerMessage}"`,
+            "Please answer this too. If your answer covers more than one question, write it clearly so I can reply to the customer and reuse it later."
+          ].join("\n\n")
+        }
+      : null;
 
   return {
     id,
@@ -942,11 +965,12 @@ function createReceptionistLearningConversation({
     receptionistLearning: {
       customerConversationId: customerConversation.id,
       customerName,
-      customerQuestion: customerMessage
+      customerQuestion: openQuestions.at(-1) || customerMessage,
+      openQuestions
     },
     messages:
       existingMessages.length > 0
-        ? existingMessages
+        ? [...existingMessages, followUpMessage].filter(Boolean)
         : [
             {
               id: 1,
@@ -962,6 +986,25 @@ function createReceptionistLearningConversation({
             }
           ]
   };
+}
+
+function normalizeQuestionList(value) {
+  const questions = Array.isArray(value) ? value : [value];
+  const seen = new Set();
+
+  return questions
+    .map((question) => String(question || "").trim())
+    .filter(Boolean)
+    .filter((question) => {
+      const key = question.toLowerCase();
+
+      if (seen.has(key)) {
+        return false;
+      }
+
+      seen.add(key);
+      return true;
+    });
 }
 
 async function getPublicBotReply(channel, conversation, message) {
@@ -1359,7 +1402,9 @@ Accuracy rules:
 - If the visitor has not provided their name yet, ask for their name before deeper sales questions.
 - When you answer using an approved fact and the prompt is stale, include that the information was last updated ${promptAge.label}.
 - Set supportedByPrompt to true only when the reply is supported by one of the approved sources.
-- Keep replies concise, warm, and useful.
+- Keep replies concise, warm, and useful. If the answer has multiple parts, use short paragraphs or Markdown bullet points.
+- Use Markdown bold only for short labels, for example **Plans:** or **How it works:**.
+- If approved knowledge contains a relevant URL, page, sitemap entry, or website link, include it as a Markdown link with descriptive link text. Never invent a URL.
 
 Return only JSON with this shape:
 {
